@@ -1,1 +1,76 @@
-Stacked and weighted datasets 
+## Preparing multiply imputed data for machine learning modelling ##
+
+## This is undertaken in R, so need to prepare Stata dataset to be usable ##
+
+## The approach is centered on stacked imputations - a stack of all 50 imputations is formed, 
+## to generate 1 long dataset, with each individual assigned a weight of 0.02 (1/50) ##
+
+## The outcome variables are jack-knife pseudovalues, so these need to be generated too ##
+
+
+*****************************************************    
+*	Prepare for ML modelling – calculate pseudovalues * 
+*****************************************************
+use "\final_datasets\OX129_endpoint3_pseudovaluescif.dta", clear           // data used in competing risks modelling 
+
+* convert to long form - m=0 at top, then stacked imputations m=1,2,3...50 below in sequence *   // m=0 is the complete case dataset 
+mi convert flong 
+
+* drop the m=0, i.e. non-imputed data *           // in flong format, _mi_m variable is generated to denote imputed set. E.g. _mi_m==10 is the 10th imputation
+tab _mi_m  
+* This is the variable to denote which imputation each row 'belongs' to * 
+drop if _mi_m==0
+
+* Stack imputations* 
+* For purposes of later modelling in R - sort by sha1 (geographical region) then by patid, then by imputation number * 
+* This will enable the predictions to be matched to each individual when IECV runs on the stacked dataset * 
+sort sha1 patid _mi_m
+
+* Remove the mi setting - this makes a 'clean' simple stacked dataset * 
+mi unset, asis 
+rename _mi_m imputation                // To track numbers if needed 
+
+* Assign weight to each bservation for use in DL/XGBoost in R - each individual 
+* has a weight of 1/50, so that all imputations together 'equal' 1 patient * 
+gen imp_weight = 1/50 
+summ imp_weight, det 
+
+********************
+* CIF pseudovalues *
+********************
+* Already calculated in the competing risks regression approach - 
+* summarise here for the record * 
+summ pseudo, det                // whole cohort 
+summ period1_pseudo, det        // used for model fitting 
+summ period2_pseudo, det        // used for model evaluation in the IECV process 
+
+* Retransform FP term to get 'final' or imputed BMI variable * 
+gen bmi_x = 1/(Idiag__1+0.135374792)
+gen bmi = 10*(sqrt(bmi_x))
+summ bmi, det                     // Unscaled values 
+
+summ townsend, det                // Already pre-generated in competing risks regression approach 
+
+* Slim down and keep salient variables (predictors, etc.) * 
+keep patid sha1 study_practice cancer_route ethriskid smoke_cat cancer_grade cancer_stage // 
+progesterone_status HER2_status vasculitis radiotherapy chemotherapy mastectomy other_surgery //
+tca hrt anti_psychotic age_at_diagnosis bmi townsend period pseudo period1_pseudo period2_pseudo //
+timesplit endpoint exit3date d_breastca fu_start fu_end imputation imp_weight iecv_event endpoint prob_cens ipcw 
+
+save "\final_datasets\ML\OX129_endpoint3_stacked50_pseudovalues.dta", replace
+
+** Form separate datasets for period 1 and period 2 - this will aid IECV in R ** 
+use  "\final_datasets\ML\OX129_endpoint3_stacked50_pseudovalues.dta", clear 
+keep if period==1 
+save "\final_datasets\ML\OX129_endpoint3_stacked50_period1_pseudovalues.dta", replace
+clear 
+
+********************************************************************************
+** Again, use previously generated dataset to make data_period2 versions * 
+use  "\final_datasets\ML\OX129_endpoint3_stacked50_pseudovalues.dta", clear 
+keep if period==2 
+save "\final_datasets\ML\OX129_endpoint3_stacked50_period2_pseudovalues.dta", replace
+clear 
+
+********************************************************************************
+********************************************************************************

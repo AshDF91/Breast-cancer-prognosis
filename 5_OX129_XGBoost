@@ -1,1 +1,707 @@
-XGBoost model fitting, then evaluation with IECV
+## XGBoost model fitting and evaluation with internal-external cross-validation ##
+
+## This is conducted in R, after data imputation, formatting, etc. in Stata ##
+
+## This stacked imputations approach enables full use of data ##
+## 'Full' data for entire cohort is used to fit the full model, with Bayesian Optimisation used to 
+## identify optimal hyperparameters via 5-fold cross-validation ##
+
+############################################################################
+############################################################################
+
+## MODEL FITTING ##
+
+#############################
+## Load in packages needed ##
+#############################
+library(survival)
+library(readr)
+library(stringr)
+library(haven)
+library(caret) 
+library(ParBayesianOptimization) 
+library(xgboost) 
+
+
+########################################################
+## Check and set working directory for importing data ##
+########################################################
+getwd() 
+setwd("/final_datasets/ML/")
+
+##################
+## Load in data ##
+##################
+data <- read_dta("OX129_endpoint3_stacked50_pseudovalues.dta")     ## Stacked dataset for entire cohort 
+str(data)
+
+#########################
+## Variable formatting ##
+#########################
+## Categorical variables need to be converted into dummy variables ##
+## First, reformat relevant parameters as factors, then convert to dummies ##
+data$ethriskid <- factor(data$ethriskid)                         # Ethnicity 
+data$smoke_cat <- factor(data$smoke_cat)                         # Smoking status 
+data$cancer_route <- factor(data$cancer_route)                   # Route to diagnosis
+data$progesterone_status <- factor(data$progesterone_status)     # PR +/-
+data$HER2_status <- factor(data$HER2_status)                     # HER2 +/-/borderline 
+data$radiotherapy <- factor(data$radiotherapy)                   # Use of RTx in 1st year 
+data$mastectomy <- factor(data$mastectomy)                       # Mastectomy in 1st year  
+data$chemotherapy <- factor(data$chemotherapy)                   # Chemo in 1st year 
+data$other_surgery <- factor(data$other_surgery)                 # Other surgery in 1st year 
+data$cancer_stage <- factor(data$cancer_stage)                   # Stage (I-IV)
+data$cancer_grade <- factor(data$cancer_grade)                   # Grade (differentiation)
+data$hrt <- factor(data$hrt)                                     # Hormone replacement therapy use
+data$vasculitis <- factor(data$vasculitis)                       # Recorded diagnosis of vasculitis 
+data$sha1 <- factor(data$sha1)                                   # Region - used for IECV
+
+## Now, start converting these factors to dummies ##
+## Set up list of parameters that need dummies ##
+dummy_parameters <- c('ethriskid', 'smoke_cat', 'radiotherapy', 'hrt', 
+                      'cancer_stage','cancer_grade', 'progesterone_status', 
+                      'HER2_status', 'anti_psychotic', 'cancer_route', 
+                      'vasculitis')
+
+## The others will be hamdled as binary ##
+## Generate the dummies ##
+dummies <- dummyVars(~ethriskid + smoke_cat + radiotherapy + mastectomy + 
+                       chemotherapy + other_surgery + tca + hrt + cancer_stage + 
+                       cancer_grade + progesterone_status + HER2_status + 
+                       cancer_route + vasculitis,  data = data)
+
+## Package the dummy variables into its own dataset, ready to bind with the ##
+## other, non-dummy parameters ##
+dummied <- as.data.frame(predict(dummies, newdata=data))
+
+## Form the ready-to-process dataset by binding the new dummies with the other 
+#numeric parameters ##
+data_for_model <- cbind(data[, -c(which(colnames(data) %in% dummy_parameters))], 
+                        dummied)
+
+## Continuous variables (age, BMI) - no scaling needed for XGB ##
+## Name variables so that we can track these in variable importance plots, etc. ##
+colnames(data_for_model)[colnames(data_for_model) == 'ethriskid.1']     <- 'White_ethnicity'
+colnames(data_for_model)[colnames(data_for_model) == 'ethriskid.2']     <- 'Indian_ethnicity'
+colnames(data_for_model)[colnames(data_for_model) == 'ethriskid.3']     <- 'Pakistani_ethnicity'
+colnames(data_for_model)[colnames(data_for_model) == 'ethriskid.4']     <- 'Bangladeshi_ethnicity'
+colnames(data_for_model)[colnames(data_for_model) == 'ethriskid.5']     <- 'Other_Asian_ethnicity'
+colnames(data_for_model)[colnames(data_for_model) == 'ethriskid.6']     <- 'Black_Caribbean_ethnicity'
+colnames(data_for_model)[colnames(data_for_model) == 'ethriskid.7']     <- 'Black_African_ethnicity'
+colnames(data_for_model)[colnames(data_for_model) == 'ethriskid.8']     <- 'Chinese_ethnicity'
+colnames(data_for_model)[colnames(data_for_model) == 'ethriskid.9']     <- 'Other_ethnicity'
+colnames(data_for_model)[colnames(data_for_model) == 'smoke_cat.0']     <- 'Non_smoker'
+colnames(data_for_model)[colnames(data_for_model) == 'smoke_cat.1']     <- 'Ex_smoker'
+colnames(data_for_model)[colnames(data_for_model) == 'smoke_cat.2']     <- 'Light_smoker'
+colnames(data_for_model)[colnames(data_for_model) == 'smoke_cat.3']     <- 'Moderate_smoker'
+colnames(data_for_model)[colnames(data_for_model) == 'smoke_cat.4']     <- 'Heavy_smoker'
+colnames(data_for_model)[colnames(data_for_model) == 'radiotherapy.1']  <- 'Radiotherapy'
+colnames(data_for_model)[colnames(data_for_model) == 'mastectomy.1']    <- 'Mastectomy'
+colnames(data_for_model)[colnames(data_for_model) == 'chemotherapy.1']  <- 'Chemotherapy'
+colnames(data_for_model)[colnames(data_for_model) == 'other_surgery.1'] <- 'Other_surgery'
+colnames(data_for_model)[colnames(data_for_model) == 'hrt.1']           <- 'HRT_use'
+colnames(data_for_model)[colnames(data_for_model) == 'cancer_stage.1']  <- 'Stage1'
+colnames(data_for_model)[colnames(data_for_model) == 'cancer_stage.2']  <- 'Stage2'
+colnames(data_for_model)[colnames(data_for_model) == 'cancer_stage.3']  <- 'Stage3'
+colnames(data_for_model)[colnames(data_for_model) == 'cancer_stage.4']  <- 'Stage4'
+colnames(data_for_model)[colnames(data_for_model) == 'cancer_grade.1']  <- 'Well_differentiated'
+colnames(data_for_model)[colnames(data_for_model) == 'cancer_grade.2']  <- 'Moderately_differentiated'
+colnames(data_for_model)[colnames(data_for_model) == 'cancer_grade.3']  <- 'Poorly_differentiated'
+colnames(data_for_model)[colnames(data_for_model) == 'progesterone_status.2'] <- 'PR_positive'
+colnames(data_for_model)[colnames(data_for_model) == 'HER2_status.1']   <- 'HER2_negative'
+colnames(data_for_model)[colnames(data_for_model) == 'HER2_status.2']   <- 'HER2_positive'
+colnames(data_for_model)[colnames(data_for_model) == 'HER2_status.3']   <- 'HER2_borderline'
+colnames(data_for_model)[colnames(data_for_model) == 'cancer_route.2']  <- 'Emergency_presentation'
+colnames(data_for_model)[colnames(data_for_model) == 'cancer_route.3']  <- 'GP_referral'
+colnames(data_for_model)[colnames(data_for_model) == 'cancer_route.4']  <- 'Inpatient_elective'
+colnames(data_for_model)[colnames(data_for_model) == 'cancer_route.5']  <- 'Other_outpatient_pathway'
+colnames(data_for_model)[colnames(data_for_model) == 'cancer_route.6']  <- 'Screening_detected'
+colnames(data_for_model)[colnames(data_for_model) == 'cancer_route.7']  <- 'Two_week_wait'
+colnames(data_for_model)[colnames(data_for_model) == 'vasculitis.1']    <- 'Vasculitis'
+
+## 'pseudo' contains the jack-knife pseudo-values for the Aalen-Johanssen CIF at 10 years ##
+x_cols <-  c('age_at_diagnosis', 'bmi', 'White_ethnicity', 'Indian_ethnicity', 
+             'Pakistani_ethnicity', 'Bangladeshi_ethnicity', 'Other_Asian_ethnicity', 
+             'Black_Caribbean_ethnicity', 'Black_African_ethnicity', 'Chinese_ethnicity', 
+             'Other_ethnicity', 'Non_smoker', 'Ex_smoker', 'Light_smoker', 
+             'Moderate_smoker', 'Heavy_smoker', 'Radiotherapy', 'Mastectomy', 
+             'Chemotherapy', 'Other_surgery',
+             'HRT_use', 'Stage1', 'Stage2', 'Stage3', 'Stage4', 'Well_differentiated', 
+             'Moderately_differentiated', 'Poorly_differentiated', 'PR_positive', 
+             'HER2_negative', 'HER2_positive', 'HER2_borderline', 
+             'Emergency_presentation', 'GP_referral', 'Inpatient_elective', 
+             'Other_outpatient_pathway', 'Screening_detected', 'Two_week_wait', 
+             'Vasculitis')
+y_cols <- c('pseudo')
+
+## Clean up environment to avoid issues with memory ##
+rm(dummied) 
+rm(data) 
+
+########################
+## Dataset formatting ##
+########################
+
+## Change dataset to a matrix  ##
+## x_train = predictor parameters ##
+x_train <- as.matrix(data_for_model[, x_cols])
+
+## Labels = the target  - the pseudovalues ##
+label_train <- as.matrix(data_for_model[, y_cols])
+
+## Weights = observation weights for stacked imputations, all = 0.02 ##
+weights <- as.matrix(data_for_model$imp_weight)
+
+
+## Form an XGB dense matrix for the development data - name it dtrain ##
+dtrain <- xgb.DMatrix(data=x_train, label=label_train, weight=weights)
+
+
+###########################################
+## Bayesian optimisation for full model  ##
+###########################################
+
+## Fit full model to entire available dataset - this is the model 
+## that will be evaluated using IECV ## 
+## We need to run cross-validation for hyperparameter tuning ##
+
+set.seed(1066)                                ## reproducibility 
+
+## Bayesian optimsation package requires you to first: specify the function 
+## one seeks to optimimse. Here, it is to find the optimal hyperparameters for the 
+## XGBoost model such that the root mean squared error (precicted and observed pseudovalues is minimised ##
+
+## Here, we set up this 'scoring function' so that we find the best values of max_depth, 
+## min_child_weight, eta, subsample, and number of boosting rounds, etc.  #
+## In order to assess the performance of each combination, 5-fold cross-validation is used.
+## We use the inbuilt xgb.cv function for this. 
+## 5-fold CV used to estimates the 'average' performance with each hyperparam selection. The smallest value of the mse desired
+## is found from the evaluation log, and these values used ##
+
+scorefunction <- function(max_depth, eta, subsample, number, alpha, gamma, 
+                          lambda, colsampletree, colsamplelevel, minchild) {
+  
+  set.seed(1066)
+  
+  dtrain <- xgb.DMatrix(data=x_train, label=label_train, weight=weights)
+  
+  pars <- list(                                   ## Define hyperparameters to eb fed to XGBoost model 
+    tree_method = "gpu_hist",                     ## Use GPU support
+    sampling_method = "gradient_based",           ## Gradient-based sampling
+    objective = "reg:squarederror",               ## Regression task 
+    eval_metric = "rmse",                         ## How model 'fit' evaluated
+    maximize = FALSE,                             ## Want to minimise this
+    weight = weights,                             ## Vector of weights used in view of imputed data
+    max_depth = max_depth,                        ## How deep each tree goes
+    eta = eta,                                    ## Learning rate
+    subsample = subsample,                        ## Proportion of observations taken in sub-sample  
+    alpha = alpha,                                ## alpha, gamma, lambda = regularisation parameters
+    gamma = gamma, 
+    lambda = lambda, 
+    colsample_bytree = colsampletree,             ## Variable columns samples for building each tree
+    colsample_bylevel = colsamplelevel,           ## Variable columns sampled for adding branches to tree
+    min_child_weight = minchild
+  )
+  
+  xgbcv <- xgb.cv(                                ## Use xgboost package's inbuilt cv function 
+    params = pars,                                ## Which parameter sets to use 
+    data = dtrain, 
+    nround = number, 
+    nfold = 5, 
+    early_stopping_rounds = 10, 
+    maximize = FALSE,                               
+    verbose = 2
+  )
+  
+  result <- min(xgbcv$evaluation_log$test_rmse_mean)  ## Extract the rmse 
+  converted_result <- -1*result                       ## so that BO can maximise it
+  
+  return(list(Score = converted_result)               ## Return the score to the function
+  )
+  
+}
+
+## Once scoring function set up, need to define the hyperparameter search space #
+
+bounds <- list(
+  max_depth = c(1L, 6L), 
+  eta = c(0.0001, 0.1), 
+  subsample = c(0.1, 0.5), 
+  number = c(1L, 1000L), 
+  alpha = c(0L, 1000L), 
+  gamma = c(0L, 1000L), 
+  lambda = c(0L, 1000L), 
+  colsampletree = c(0.1, 0.8), 
+  colsamplelevel = c(0.1, 0.8), 
+  minchild = c(0L, 1000L)
+)
+
+## Finally, set up the Bayesian optimisation, and run it with the above functions/details ##
+
+start <- Sys.time()                              ## Like to time things 
+
+bayesian_boost <- bayesOpt(
+  FUN = scorefunction, 
+  bounds = bounds,                               ## Tells function which search space to use
+  initPoints = 15,                               ## 15 trials first, followed by 
+  iters.n = 25,                                  ## 25 iterations of BO 
+  iters.k = 1, 
+  parallel = FALSE, 
+  verbose = 2, 
+  acq = "ucb",                                   ##upper confidence bound acquisition function 
+  plotProgress = TRUE
+)
+
+end <- Sys.time() 
+end-start 
+
+bayesian_boost$scoreSummary                      ## Get summary of models fitted 
+bestpars <- getBestPars(bayesian_boost)
+bestpars                                         ## List the optimal hyperparameter configuration 
+
+# Store these best values to plug into a model fitted to the full development data #
+opt_maxdepth        = bestpars[1]
+opt_eta             = bestpars[2]
+opt_subsamp         = bestpars[3]
+opt_number          = bestpars[4]
+opt_alpha           = bestpars[5]
+opt_gamma           = bestpars[6]
+opt_lambda          = bestpars[7]
+opt_colsampletree   = bestpars[8]
+opt_colsamplelevel  = bestpars[9] 
+opt_minchild        = bestpars[10] 
+
+# set these as the parameters for the model # 
+
+parameters <- list(tree_method = "gpu_hist", 
+                   sampling_method = "gradient_based", 
+                   objective = "reg:squarederror", 
+                   eval_metric = "rmse", 
+                   maximize = FALSE, 
+                   weight = weights, 
+                   max_depth = opt_maxdepth, 
+                   eta = opt_eta, 
+                   subsample = opt_subsamp, 
+                   alpha = opt_alpha, 
+                   gamma = opt_gamma, 
+                   lambda = opt_lambda, 
+                   colsample_bytree = opt_colsampletree, 
+                   colsample_bylevel = opt_colsamplelevel, 
+                   min_child_weight = opt_minchild
+                   )
+
+xgboost_model_endpoint3 <- xgb.train(data = dtrain, param = parameters, 
+                             nrounds = opt_number$number, verbose =2)
+
+xgb.save(xgboost_model_endpoint3, fname = "xgboost_model_endpoint3")   ## Save this final model 
+
+## Variable importance - all predictors ##
+importance.matrix <- xgb.importance(colnames(x_train), model=xgboost_model_endpoint3)
+xgb.plot.importance(importance.matrix, rel_to_first=TRUE, xlab="Relative predictor importance", col="darkblue", cex=0.4) 
+
+## Variable importance - top 10 predictors ##
+importance.matrix <- xgb.importance(colnames(x_train), model=xgboost_model_endpoint3)
+xgb.plot.importance(importance.matrix, rel_to_first=TRUE, xlab="Relative predictor importance", col="darkblue", cex=0.8, top_n=10)
+
+## Same as first, but print all values in a Table so can interpret more easily ##
+importance.matrix <- xgb.importance(colnames(x_train), model=xgboost_model_endpoint3)
+table <- xgb.plot.importance(importance.matrix, plot=FALSE)
+table 
+
+
+# Clear everything, so we can now run the internal-external cross-validation ##
+rm(list = ls())
+
+################################################################################
+################################################################################
+
+## MODEL EVALUATION ##
+
+#################
+# Load packages #
+#################
+library(survival)
+library(xgboost)
+library(readr)
+library(haven)
+library(stringr)
+library(caret)
+library(ParBayesianOptimization)
+
+#####################################
+# Open and format datasets for IECV #
+#####################################
+# Note - in these, rows are sorted by region, and then by patid, to allow safe merging in Stata #
+getwd() 
+setwd("/final_datasets/ML/")
+
+## Import Period 1 data first - this is used for iterative model fitting ##
+data_period1 <- read_dta("OX129_endpoint3_stacked50_period1_pseudovalues.dta")
+str(data_period1)
+data_period1$ethriskid           <- factor(data_period1$ethriskid)           # Ethnicity 
+data_period1$smoke_cat           <- factor(data_period1$smoke_cat)           # Smoking status 
+data_period1$cancer_route        <- factor(data_period1$cancer_route)        # Route to diagnosis
+data_period1$progesterone_status <- factor(data_period1$progesterone_status) # PR +/-
+data_period1$HER2_status         <- factor(data_period1$HER2_status)         # HER2 +/-/borderline 
+data_period1$radiotherapy        <- factor(data_period1$radiotherapy)        # Use of RTx in 1st year 
+data_period1$mastectomy          <- factor(data_period1$mastectomy)          # Mastectomy in 1st year  
+data_period1$chemotherapy        <- factor(data_period1$chemotherapy)        # Chemo in 1st year 
+data_period1$other_surgery       <- factor(data_period1$other_surgery)       # Other surgery in 1st year 
+data_period1$cancer_stage        <- factor(data_period1$cancer_stage)        # Stage (I-IV)
+data_period1$cancer_grade        <- factor(data_period1$cancer_grade)        # Grade (differentiation)
+data_period1$hrt                 <- factor(data_period1$hrt)                 # Hormone replacement therapy use
+data_period1$vasculitis          <- factor(data_period1$vasculitis)          # Vasculitis 
+data_period1$sha1                <- factor(data_period1$sha1)                # Region - used for IECV
+
+## Now, start converting these factors to dummies ##
+## Set up list of parameters that need dummies ##
+dummy_parameters <- c('ethriskid', 'smoke_cat', 'radiotherapy',  
+                      'progesterone_status', 'HER2_status', 'radiotherapy', 
+                      'mastectomy', 'chemotherapy', 'other_surgery', 'cancer_stage', 
+                      'cancer_grade', 'tca', 'hrt', 'vasculitis',
+                      'cancer_route' )
+
+## The others will be hamdled as binary ##
+## Generate the dummies ##
+dummies <- dummyVars(~ethriskid + smoke_cat + radiotherapy + mastectomy + 
+                       chemotherapy + other_surgery + hrt + cancer_stage + 
+                       cancer_grade + progesterone_status + HER2_status + 
+                       cancer_route + vasculitis, data = data_period1)
+
+# Package the dummy variables into its own dataset, ready to bind with the 
+# other, non-dummy parameters #
+dummied <- as.data.frame(predict(dummies, newdata=data_period1))
+
+# Form the ready-to-process dataset by binding the new dummies with the other 
+#numeric parameters #
+data_period1 <- cbind(data_period1[, -c(which(colnames(data_period1) %in% dummy_parameters))], 
+                        dummied)
+
+## Continuous variables (age, BMI, Townsend score) - no scaling needed for XGB ##
+
+## Set up the predictors ('x cols') and outcome ('y cols') ##
+## Rename variables (inc. new dummies) where relevant for interpretation of 
+## variable importance and other graphs later ##
+colnames(data_period1)[colnames(data_period1) == 'ethriskid.1'] <- 'White_ethnicity'
+colnames(data_period1)[colnames(data_period1) == 'ethriskid.2'] <- 'Indian_ethnicity'
+colnames(data_period1)[colnames(data_period1) == 'ethriskid.3'] <- 'Pakistani_ethnicity'
+colnames(data_period1)[colnames(data_period1) == 'ethriskid.4'] <- 'Bangladeshi_ethnicity'
+colnames(data_period1)[colnames(data_period1) == 'ethriskid.5'] <- 'Other_Asian_ethnicity'
+colnames(data_period1)[colnames(data_period1) == 'ethriskid.6'] <- 'Black_Caribbean_ethnicity'
+colnames(data_period1)[colnames(data_period1) == 'ethriskid.7'] <- 'Black_African_ethnicity'
+colnames(data_period1)[colnames(data_period1) == 'ethriskid.8'] <- 'Chinese_ethnicity'
+colnames(data_period1)[colnames(data_period1) == 'ethriskid.9'] <- 'Other_ethnicity'
+colnames(data_period1)[colnames(data_period1) == 'smoke_cat.0'] <- 'Non_smoker'
+colnames(data_period1)[colnames(data_period1) == 'smoke_cat.1'] <- 'Ex_smoker'
+colnames(data_period1)[colnames(data_period1) == 'smoke_cat.2'] <- 'Light_smoker'
+colnames(data_period1)[colnames(data_period1) == 'smoke_cat.3'] <- 'Moderate_smoker'
+colnames(data_period1)[colnames(data_period1) == 'smoke_cat.4'] <- 'Heavy_smoker'
+colnames(data_period1)[colnames(data_period1) == 'radiotherapy.1'] <- 'Radiotherapy'
+colnames(data_period1)[colnames(data_period1) == 'mastectomy.1'] <- 'Mastectomy'
+colnames(data_period1)[colnames(data_period1) == 'chemotherapy.1'] <- 'Chemotherapy'
+colnames(data_period1)[colnames(data_period1) == 'other_surgery.1'] <- 'Other_surgery'
+colnames(data_period1)[colnames(data_period1) == 'hrt.1'] <- 'HRT_use'
+colnames(data_period1)[colnames(data_period1) == 'cancer_stage.1'] <- 'Stage1'
+colnames(data_period1)[colnames(data_period1) == 'cancer_stage.2'] <- 'Stage2'
+colnames(data_period1)[colnames(data_period1) == 'cancer_stage.3'] <- 'Stage3'
+colnames(data_period1)[colnames(data_period1) == 'cancer_stage.4'] <- 'Stage4'
+colnames(data_period1)[colnames(data_period1) == 'cancer_grade.1'] <- 'Well_differentiated'
+colnames(data_period1)[colnames(data_period1) == 'cancer_grade.2'] <- 'Moderately_differentiated'
+colnames(data_period1)[colnames(data_period1) == 'cancer_grade.3'] <- 'Poorly_differentiated'
+colnames(data_period1)[colnames(data_period1) == 'progesterone_status.2'] <- 'PR_positive'
+colnames(data_period1)[colnames(data_period1) == 'HER2_status.1'] <- 'HER2_negative'
+colnames(data_period1)[colnames(data_period1) == 'HER2_status.2'] <- 'HER2_positive'
+colnames(data_period1)[colnames(data_period1) == 'HER2_status.3'] <- 'HER2_borderline'
+colnames(data_period1)[colnames(data_period1) == 'cancer_route.2'] <- 'Emergency_presentation'
+colnames(data_period1)[colnames(data_period1) == 'cancer_route.3'] <- 'GP_referral'
+colnames(data_period1)[colnames(data_period1) == 'cancer_route.4'] <- 'Inpatient_elective'
+colnames(data_period1)[colnames(data_period1) == 'cancer_route.5'] <- 'Other_outpatient_pathway'
+colnames(data_period1)[colnames(data_period1) == 'cancer_route.6'] <- 'Screening_detected'
+colnames(data_period1)[colnames(data_period1) == 'cancer_route.7'] <- 'Two_week_wait'
+colnames(data_period1)[colnames(data_period1) == 'vasculitis.1'] <- 'Vasculitis'
+
+## 'pseudo' are the jack-knife pseudo-values for the Aalen-Johanssen CIF at 10 years ##
+x_cols <-  c('age_at_diagnosis', 'bmi', 'White_ethnicity', 'Indian_ethnicity', 
+             'Pakistani_ethnicity', 'Bangladeshi_ethnicity', 'Other_Asian_ethnicity', 
+             'Black_Caribbean_ethnicity', 'Black_African_ethnicity', 'Chinese_ethnicity', 
+             'Other_ethnicity', 'Non_smoker', 'Ex_smoker', 'Light_smoker', 
+             'Moderate_smoker', 'Heavy_smoker', 'Radiotherapy', 'Mastectomy', 
+             'Chemotherapy', 'Other_surgery',
+             'HRT_use', 'Stage1', 'Stage2', 'Stage3', 'Stage4', 'Well_differentiated', 
+             'Moderately_differentiated', 'Poorly_differentiated', 'PR_positive', 
+             'HER2_negative', 'HER2_positive', 'HER2_borderline', 
+             'Emergency_presentation', 'GP_referral', 'Inpatient_elective', 
+             'Other_outpatient_pathway', 'Screening_detected', 'Two_week_wait', 
+             'Vasculitis')
+             
+## Target for model fit is Period 1 pseudovalues ##
+## Target for the evaluation are the Period 2 pseudovalues ##
+y_cols <- c('period1_pseudo')
+
+######################################
+## NOW, REPEAT FOR PERIOD 2 DATASET ##
+######################################
+
+setwd("/final_datasets/ML/")
+data_period2 <- read_dta("OX129_endpoint3_stacked50_period2_pseudovalues.dta")
+str(data_period2)
+
+## Need to reformat categorical variables ##
+## Categorical variables need to be converted into dummy variables ##
+## First, reformat relevant parameters as factors, then convert to dummies #
+data_period2$ethriskid           <- factor(data_period2$ethriskid)                # Ethnicity 
+data_period2$smoke_cat           <- factor(data_period2$smoke_cat)                # Smoking status 
+data_period2$cancer_route        <- factor(data_period2$cancer_route)             # Route to diagnosis
+data_period2$progesterone_status <- factor(data_period2$progesterone_status)      # PR +/-
+data_period2$HER2_status         <- factor(data_period2$HER2_status)              # HER2 +/-/borderline 
+data_period2$radiotherapy        <- factor(data_period2$radiotherapy)             # Use of RTx in 1st year 
+data_period2$mastectomy          <- factor(data_period2$mastectomy)               # Mastectomy in 1st year  
+data_period2$chemotherapy        <- factor(data_period2$chemotherapy)             # Chemo in 1st year 
+data_period2$other_surgery       <- factor(data_period2$other_surgery)            # Other surgery in 1st year 
+data_period2$cancer_stage        <- factor(data_period2$cancer_stage)             # Stage (I-IV)
+data_period2$cancer_grade        <- factor(data_period2$cancer_grade)             # Grade (differentiation)
+data_period2$hrt                 <- factor(data_period2$hrt)                      # Hormone replacement therapy use
+data_period2$vasculitis          <- factor(data_period2$vasculitis)               # vasculitis 
+data_period2$sha1                <- factor(data_period2$sha1)                     # Region - used for IECV
+
+# Generate the dummies #
+dummies2 <- dummyVars(~ethriskid + smoke_cat + radiotherapy + mastectomy + 
+                       chemotherapy + other_surgery + hrt + cancer_stage + 
+                       cancer_grade + progesterone_status + HER2_status + 
+                       cancer_route + vasculitis, data = data_period2)
+
+# Package the dummy variables into its own dataset, ready to bind with the
+# other, non-dummy parameters #
+dummied2 <- as.data.frame(predict(dummies2, newdata=data_period2))
+
+# Form the ready-to-process dataset by binding the new dummies with the other 
+# numeric parameters #
+data_period2 <- cbind(data_period2[, -c(which(colnames(data_period2) %in% 
+                                                dummy_parameters))], dummied2)
+
+## rename variables for understanding ##
+colnames(data_period2)[colnames(data_period2) == 'ethriskid.1'] <- 'White_ethnicity'
+colnames(data_period2)[colnames(data_period2) == 'ethriskid.2'] <- 'Indian_ethnicity'
+colnames(data_period2)[colnames(data_period2) == 'ethriskid.3'] <- 'Pakistani_ethnicity'
+colnames(data_period2)[colnames(data_period2) == 'ethriskid.4'] <- 'Bangladeshi_ethnicity'
+colnames(data_period2)[colnames(data_period2) == 'ethriskid.5'] <- 'Other_Asian_ethnicity'
+colnames(data_period2)[colnames(data_period2) == 'ethriskid.6'] <- 'Black_Caribbean_ethnicity'
+colnames(data_period2)[colnames(data_period2) == 'ethriskid.7'] <- 'Black_African_ethnicity'
+colnames(data_period2)[colnames(data_period2) == 'ethriskid.8'] <- 'Chinese_ethnicity'
+colnames(data_period2)[colnames(data_period2) == 'ethriskid.9'] <- 'Other_ethnicity'
+colnames(data_period2)[colnames(data_period2) == 'smoke_cat.0'] <- 'Non_smoker'
+colnames(data_period2)[colnames(data_period2) == 'smoke_cat.1'] <- 'Ex_smoker'
+colnames(data_period2)[colnames(data_period2) == 'smoke_cat.2'] <- 'Light_smoker'
+colnames(data_period2)[colnames(data_period2) == 'smoke_cat.3'] <- 'Moderate_smoker'
+colnames(data_period2)[colnames(data_period2) == 'smoke_cat.4'] <- 'Heavy_smoker'
+colnames(data_period2)[colnames(data_period2) == 'radiotherapy.1'] <- 'Radiotherapy'
+colnames(data_period2)[colnames(data_period2) == 'mastectomy.1'] <- 'Mastectomy'
+colnames(data_period2)[colnames(data_period2) == 'chemotherapy.1'] <- 'Chemotherapy'
+colnames(data_period2)[colnames(data_period2) == 'other_surgery.1'] <- 'Other_surgery'
+colnames(data_period2)[colnames(data_period2) == 'hrt.1'] <- 'HRT_use'
+colnames(data_period2)[colnames(data_period2) == 'cancer_stage.1'] <- 'Stage1'
+colnames(data_period2)[colnames(data_period2) == 'cancer_stage.2'] <- 'Stage2'
+colnames(data_period2)[colnames(data_period2) == 'cancer_stage.3'] <- 'Stage3'
+colnames(data_period2)[colnames(data_period2) == 'cancer_stage.4'] <- 'Stage4'
+colnames(data_period2)[colnames(data_period2) == 'cancer_grade.1'] <- 'Well_differentiated'
+colnames(data_period2)[colnames(data_period2) == 'cancer_grade.2'] <- 'Moderately_differentiated'
+colnames(data_period2)[colnames(data_period2) == 'cancer_grade.3'] <- 'Poorly_differentiated'
+colnames(data_period2)[colnames(data_period2) == 'progesterone_status.2'] <- 'PR_positive'
+colnames(data_period2)[colnames(data_period2) == 'HER2_status.1'] <- 'HER2_negative'
+colnames(data_period2)[colnames(data_period2) == 'HER2_status.2'] <- 'HER2_positive'
+colnames(data_period2)[colnames(data_period2) == 'HER2_status.3'] <- 'HER2_borderline'
+colnames(data_period2)[colnames(data_period2) == 'cancer_route.2'] <- 'Emergency_presentation'
+colnames(data_period2)[colnames(data_period2) == 'cancer_route.3'] <- 'GP_referral'
+colnames(data_period2)[colnames(data_period2) == 'cancer_route.4'] <- 'Inpatient_elective'
+colnames(data_period2)[colnames(data_period2) == 'cancer_route.5'] <- 'Other_outpatient_pathway'
+colnames(data_period2)[colnames(data_period2) == 'cancer_route.6'] <- 'Screening_detected'
+colnames(data_period2)[colnames(data_period2) == 'cancer_route.7'] <- 'Two_week_wait'
+colnames(data_period2)[colnames(data_period2) == 'vasculitis.1'] <- 'Vasculitis' 
+
+z_cols <- c('period2_pseudo')            ## To form xgb.DMatrix for validation data, need to provide labels 
+
+## Check dimensions of two sub-sets ##
+dim(data_period1)
+dim(data_period2)
+
+## Clean up memory by removing the dummied interim datasets 
+rm(dummied) 
+rm(dummied2) 
+
+## Weights = observation weights for stacked imputations, all = 0.02 ##
+weights <- as.matrix(data_period1$imp_weight)
+
+
+################################
+# Bayesian optimisation set-up #
+################################
+
+# There are 10 regions (sha1 variable), so set up loop to go over each of them #
+# Development data = period 1, region 'all except i', validation data = period 2, region i #
+
+# Set up empty list for storing individual predictions # 
+iecv_predictions = list()
+
+# Bounds for the search space for BO # 
+bounds <- list(
+  max_depth = c(1L, 6L), 
+  eta = c(0.0001, 0.1), 
+  subsample = c(0.1, 0.5), 
+  number = c(1L, 1000L), 
+  alpha = c(0L, 1000L), 
+  gamma = c(0L, 1000L), 
+  lambda = c(0L, 1000L),                       ## Same as for model fitting steps abive 
+  colsampletree = c(0.1, 0.8), 
+  colsamplelevel = c(0.1, 0.8), 
+  minchild = c(0L, 1000L)
+)
+
+start <- Sys.time()                            ## Like timing
+
+## LOOP STARTS HERE ##
+
+for(a in seq(1:10)) {                          ## Cycle through each value of region(sha1) from 1 to 10 
+  
+set.seed(1066)  
+
+  data_dev = data_period1[ -which (data_period1$sha1 == levels(data_period1$sha1)[a]), ]  ## Development data = all except region 'a' in period 1
+  data_val = data_period2[ which (data_period2$sha1 == levels(data_period2$sha1)[a]), ]   ## Validation data = region 'a' in period 2 
+  
+  x_dev <- as.matrix(data_dev[, x_cols])                      ## Form matrices for these dev/val sub-sets 
+  label_dev <- as.matrix(data_dev[, y_cols])                  ## And their labels (pseudovalues)
+  x_val <- as.matrix(data_val[, x_cols])                      ## These are replaced with each loop iteration         
+  label_val <- as.matrix(data_val[, z_cols])
+  
+  weights <- as.matrix(data_dev$imp_weight)                   ## Weights too
+  
+  ddev <- xgb.DMatrix(data=x_dev, label=label_dev, weight=weights)    ## join these together to hand to XGBoost  
+  dval <- xgb.DMatrix(data=x_val, label=label_val)                    ## Same, but for the validation data for this loop 
+ 
+  scorefunction <- function(max_depth, eta, subsample, number, alpha, gamma,      ## Nested cross-validation loop for hyperparameter tuning 
+                          lambda, colsampletree, colsamplelevel, minchild) {      ## same style objective function for Bayesian optimisation to minimise
+                                 
+    pars <- list(                                                       ## Model hyperparamaters as above 
+    tree_method = "gpu_hist", 
+    sampling_method = "gradient_based", 
+    objective = "reg:squarederror", 
+    eval_metric = "rmse", 
+    maximize = FALSE, 
+    weight = weights, 
+    max_depth = max_depth, 
+    eta = eta, 
+    subsample = subsample, 
+    alpha = alpha, 
+    gamma = gamma, 
+    lambda = lambda, 
+    colsample_bytree = colsampletree, 
+    colsample_bylevel = colsamplelevel, 
+    min_child_weight = minchild
+  )
+    
+    xgbcv <- xgb.cv(                                                    ## Run nested 5-fold cross-validation to test the hyperparameter combo
+      params = pars, 
+      data = ddev, 
+      nround = number, 
+      nfold = 5, 
+      early_stopping_rounds = 10, 
+      maximize = FALSE, 
+      verbose = 1
+    )
+    
+    result <- min(xgbcv$evaluation_log$test_rmse_mean)                  ## Extract the result 
+    converted_result <- -1*result                                       ## We want to minimise RMSE, so maximimse the -ve RMSE
+    
+    return(list(Score = converted_result)                               ## Pass these 'scores' to the Bayesian Optim package 
+    )
+    
+  }
+
+  ## Finally, having set up the Bayesian optimisation, run it with the above functions/details ##
+  
+  bayesian_boost <- bayesOpt(                                                
+  FUN = scorefunction, 
+  bounds = bounds, 
+  initPoints = 15, 
+  iters.n = 25,
+  iters.k = 1, 
+  parallel = FALSE, 
+  verbose = 1, 
+  acq = "ucb", 
+  plotProgress = FALSE, 
+  otherHalting = list(timeLimit=10800)                                   ## Stop if >3hrs taken on one cycle of loop 
+)
+  
+  ## Evaluate the output of the Bayesian Optimisation process ## 
+  # Extract the best hyperparameters combination found #
+  bayesian_boost$scoreSummary 
+  bestpars <- getBestPars(bayesian_boost)
+  
+  # Store these best values to plug into a model fitted to this loop's development data #
+  
+  opt_maxdepth        = bestpars[1]
+  opt_eta             = bestpars[2]
+  opt_subsamp         = bestpars[3]
+  opt_number          = bestpars[4]
+  opt_alpha           = bestpars[5]
+  opt_gamma           = bestpars[6]
+  opt_lambda          = bestpars[7]
+  opt_colsampletree   = bestpars[8]
+  opt_colsamplelevel  = bestpars[9] 
+  opt_minchild        = bestpars[10]
+  
+  # set these as the parameters for the loop's model # 
+  
+  parameters <- list(tree_method = "gpu_hist", 
+                   sampling_method = "gradient_based", 
+                   objective = "reg:squarederror", 
+                   eval_metric = "rmse", 
+                   maximize = FALSE, 
+                   weight = weights, 
+                   max_depth = opt_maxdepth, 
+                   eta = opt_eta, 
+                   subsample = opt_subsamp, 
+                   alpha = opt_alpha, 
+                   gamma = opt_gamma, 
+                   lambda = opt_lambda, 
+                   colsample_bytree = opt_colsampletree, 
+                   colsample_bylevel = opt_colsamplelevel, 
+                   min_child_weight = opt_minchild
+                   )
+  
+  xgboost_iecv_loop <- xgb.train(data = ddev, param = parameters,               ## Fit the model with optimal hyperparameter config identified from this loop 
+                                       nrounds = opt_number$number, verbose=2)
+  
+  
+  predictions.test <- predict(xgboost_iecv_loop, dval)                          ## Make predictions on held out period 2 data for region 'a'
+  iecv_predictions[[a]] = predictions.test                                      ## Store these predictions in the pre-made repository for access later
+}    ## Then repeat so that all regions are cycled through 
+
+## LOOP ENDS ##
+
+end <-Sys.time() 
+end-start            ## Takes approx. 1.8 days with GPU support on my server 
+
+#####################################
+# POOLING THE PREDICTIONS FROM IECV #
+#####################################
+
+# Combine the predictions made on the held out data from each cycle #
+xgboost_iecv_predictions <- c(iecv_predictions[[1]], iecv_predictions[[2]], iecv_predictions[[3]],
+                              iecv_predictions[[4]], iecv_predictions[[5]], iecv_predictions[[6]],
+                              iecv_predictions[[7]], iecv_predictions[[8]], iecv_predictions[[9]],
+                              iecv_predictions[[10]])
+# Check sensible - no overt error! #
+summary(xgboost_iecv_predictions) 
+
+# Extract the patient ID - need this to merge together later for calculating performance metrics in Stata #
+patid <- as.data.frame(data_period2$patid)
+export_predictions <- cbind(patid, xgboost_iecv_predictions)    ## bind these columns together 
+head(export_predictions)
+
+# Save the predictions for later use - will be used to evaluate performance of the model fitted to the entire data #
+setwd("/estimates/ML_IECV_predictions/")
+# Save as csv for easy importing into Stata #
+write.csv(export_predictions, file="endpoint3_xgboost_iecv_predictions.csv")
+
+
+###########################################################################################
+###########################################################################################

@@ -1,0 +1,563 @@
+## Cox proportional hazards model ##
+
+
+## Fractional polynomial selection, and multiple imputation already performed 
+## outcomedate6 = date of breast cancer diagnosis (start of follow-up) 
+## d_breastcancer = binary variable denoting breast cancer death (=1) or not (=0)
+## exit3date = date left cohort (died, or censored) 
+## exit3status = categorical (0=censored, 1 = died) 
+## Period = binary denoting decade of cohort entry (1=entered pre-2010, 2 = entered 2010 onwards) 
+
+
+********************************************************************************
+*          1) FIT FULL MODEL, PERFORM PREDICTOR VARIABLE SELECTION             *
+********************************************************************************
+# Complete file paths not displayed #
+
+use "\final_datasets\OX129_endpoint3_imputed.dta"
+
+* Tabulate events - d_breastcancer = breast cancer death (of interest), 
+* exit3status = contains all cause death (use to define competing event)
+tab d_breastcancer 
+tab exit3status
+
+gen time = exit3date - outcomedate6 
+replace time = time/365.25
+
+************************************************************************
+* Stset the data - 10 year exit date as this is the prediction horizon *
+************************************************************************ 
+mi stset time, failure(d_breastca==1) exit(time 10)
+
+************************************************************************
+* Rescale Townsend variable - Itown was made by mfp command, power = 1 *
+************************************************************************ 
+* the 0.57 is to undo the centering performed by mfp * 
+mi passive: gen townsend = Itown__1-0.5719195882
+
+********************************************
+** Fit full model, including interactions **
+******************************************** 
+* Form global for covariates, then use this in the model * 
+global covariates = "Iage* Idiag* townsend i.ethriskid i.alcohol_cat i.smoke_cat //
+ib6.cancer_route ib2.progesterone ib2.HER2 i.fh_breastca i.radio i.chemo i.mastect//
+i.other_surg i.cancer_stage i.cancer_grade i.ckd i.cirrhosis i.htn i.ihd i.type1dm //
+i.type2dm i.vasculitis i.lupus i.thiazide i.betablocker i.acei i.raa i.tca i.ssri //
+i.maoi i.otherantidepress i.ocp i.hrt i.anti_psycho c.Iage___1##i.chemo c.Iage___2##i.chemo //
+c.Iage___1##i.mastec c.Iage___2##i.mastec c.Iage___1##i.other_surg c.Iage___2##i.other_surg //
+c.Iage___1##i.fh_breastca c.Iage___2##i.fh_breastca c.Iage___1##i.ethriskid c.Iage___2##i.ethriskid i.mastectomy##i.ethriskid i.other_surg##i.ethriskid"
+
+* Fit the model, and save 'full model' coefficients for later use if needed) 
+cd "\models\Endpoint_3\"
+
+mi estimate, dots eform errorok: stcox $covariates, vce(cluster study_practice) 
+parmest, list(,) saving(cox_endpoint3_parmest_fullmodel_preselection.dta, replace) label eform for(estimate min95 max95) 
+
+********************************************************************************
+
+
+********************************************************************************
+*                             2) FIT FINAL MODEL                               *
+********************************************************************************
+
+************************************************************
+** Refit model, with variables meeting inclusion criteria **
+************************************************************
+* Keep if HR<0.9 or HR>1.1 and p<0.05 * 
+* Keep if interaction significant at p<0.05 * 
+
+global selected_covariates = "Iage* Idiag* i.smoke_cat ib6.cancer_route ib2.progesterone //
+ib2.HER2 i.fh_breastca i.radio i.mastect i.other_surg i.cancer_stage i.cancer_grade i.ckd //
+i.cirrhosis i.tca i.ssri i.otherantidepress i.hrt i.anti_psycho c.Iage___1##i.mastec c.Iage___2##i.mastec //
+c.Iage___1##i.other_surg c.Iage___2##i.other_surg i.ethriskid##i.mastectomy" 
+
+************************
+* Save final Cox model *
+************************ 
+mi estimate, dots eform errorok saving(cox_ep3, replace): stcox $selected_covariates, vce(cluster study_practice) 
+parmest, list(,) saving(cox_endpoint3_parmest.dta, replace) label eform for(estimate min95 max95) 
+
+* Calculate baseline function after Cox model (rather than KM estimate) * 
+* Use mi xeq function to estimate baseline survival function in each imputation, then pool (average) *  
+mi query 
+local M = r(M)
+scalar base_surv = 0 
+mi xeq 1/`M': stcox $selected_covariates ; predict double basesurv, basesurv ; summ basesurv if _t<10; scalar base_surv = base_surv + r(min)
+scalar base_surv = base_surv/`M' 
+disp as txt "Pooled baseline survivor function over imputations = " as res base_surv 
+gen baseline_surv_cox = base_surv
+summ baseline_surv_cox
+
+
+********************************************************************************
+
+
+********************************************************************************
+*                 	3) INTERNAL-EXTERNAL CROSS-VALIDATION RUN                  *
+********************************************************************************
+
+**********************
+* Preparing for IECV * 
+**********************
+
+* Need to generate a measure of FU time from entry to earliest of: event/cens- * 
+* oring/end of period 1/end of study * 
+* We want 2 temporally distinct sub-cohorts, with no overlap. Therefore, follow-up 
+* ends at the earliest of event, censoring date, or the end of the decade * 
+
+* outcomedate6 is date of breast cancer diagnosis * 
+gen fu_start = outcomedate6 
+format fu_start %td 
+gen fu_end = . 
+
+* Generate variable denoting cut off point for the two temp. distinct sub-cohorts * 
+gen timesplit = mdy(01,01,2010)
+format timesplit %td
+tab period, m 
+
+* People in Period1 - truncate follow-up as appropriate * 
+replace fu_end = min(exit3date, timesplit) if period==1 
+replace fu_end = exit3date if period==2 
+format fu_end %td 
+
+* Calculate follow-up time using IECV-suitable dates * 
+gen follow_up = fu_end-fu_start
+summ follow_up, det 
+replace follow_up = follow_up/365.25
+
+* Overall event counts, any time in study period * 
+tab d_breastca 
+
+* Generate new event indicator for IECV - event only within period of entry * 
+gen iecv_event = 0 
+replace iecv_event = 1 if period==1 & d_breastca==1 & exit3date<timesplit  
+replace iecv_event = 1 if period==2 & d_breastca==1 
+
+tab period 
+tab iecv_event 
+tab period iecv_event 
+
+* quick  checks * 
+tab iecv_event if period==1 
+tab iecv_event if period==2
+
+* Estimate baseline survival function in period 1 data- used for later computation
+* of predicted risks in Period 2 by combining with linear predictors from IECV * 
+mi stset follow_up if period==1, failure(iecv_event==1) exit(time 10)
+ 
+mi query 
+local M = r(M)
+scalar period1_base_surv = 0 
+mi xeq 1/`M': qui stcox $selected_covariates ; predict double basesurv, basesurv ; summ basesurv if _t<10; scalar period1_base_surv = period1_base_surv + r(min)
+scalar period1_base_surv = period1_base_surv/`M' 
+disp as txt "Pooled baseline survivor function over imputations = " as res period1_base_surv 
+gen period1_baseline_surv_cox = period1_base_surv
+summ period1_baseline_surv_cox  
+
+* stset the data for the IECV process proper - take into account the event and time * 
+mi stset follow_up, failure(iecv_event==1) exit(time 10)
+
+************
+* Run IECV *
+************ 
+save "\final_datasets\OX129_endpoint3_imputed_IECV.dta", replace
+* Convert to long format so that all predictions (i.e. for each imputation) are saved * 
+mi convert flong 
+
+* Generate new variables in which to store held out predictions* 
+* Want to keep linear predictor (can be converted into HR later) *
+* Then, we can use them for the pooled overall metrics, but also to calculate centre-specific estimates *  
+gen iecv_xb = .  
+
+* Loop over each region, fit model, estimate metrics on held out region data. Later, we present individual practice results * 
+cd "\estimates\"
+
+ merge m:1 patid using "\final_datasets\OX129_endpoint3_sha1.dta"
+
+forval x = 1(1)10 {                                                                                                 \\ 10 geograhical regions 
+	mi estimate, dots errorok saving(myestiecv_ep3, replace): stcox $selected_covariates if (sha1!=`x' & period==1)   \\ fit model, save temporarily
+	mi predict double xb if (sha1==`x' & period==2) using myestiecv_ep3, xb storecompleted                            \\ double precision using the model just fitted 
+	replace iecv_xb = xb if iecv_xb==.                                                                                 
+	drop xb                                                                                                           \\ clear xb so loop can run on next region
+	display `x'
+}
+
+summ iecv_xb, det 
+count if iecv_xb==.                                                      \\ Show those that do not have IECV-yielded prediction (should equal number in Period 1 )
+tab period 
+
+* Save updated dataset: save predictions, and then can use for the model evaluation* 
+save "\final_datasets\OX129_endpoint3_imputed_IECV.dta", replace
+
+clear 
+
+********************************************************************************
+
+
+********************************************************************************
+*	          4) PERFORMANCE ASSESSMENT, INC. HETEROGENEITY                    *
+********************************************************************************
+
+use "\final_datasets\OX129_endpoint3_imputed_IECV.dta", clear 
+
+************************************************
+* Pooled metrics - those without meta-analysis *
+************************************************
+
+* Calibration slope overall in period 2 data * 
+* Slope is estimated using a second Cox model - regress linear predictor * 
+mi stset follow_up, failure(iecv_event==1) exit(time 10)
+mi estimate, dots: stcox iecv_xb if period==2, vce(cluster study_practice)
+
+* Calibration-in-the-large in period 2 data * 
+mi estimate, dots: stcox iecv_xb if period==2, offset(iecv_xb) vce(cluster study_practice) 
+
+* Smoothed calibration plot * 
+* Save before converting to wide format to avoid Stata error * 
+* Coverting to wide takes the average imputation value (e.g. average prediction - fits with Rubin's rules) * 
+save "\final_datasets\OX129_endpoint3_imputed_IECV.dta", replace 
+mi convert wide 
+* Directory to where ado files are stored, so that command can run * 
+cd "\ado\plus\"        
+* Pseudovalues for failure function in Period 2 data - 'observed' event probs * 
+stpsurv if period==2, failure at(10) gen(period2_pseudo)
+summ period2_pseudo, det 
+* Calculated 'predicted' probs - use IECV linear predictors and the baseline 
+* 10yr survival function estimated in the whole cohort * 
+* Use the average value of iecv_xb across all imputations * 
+gen iecv_risk10yr = 1 - period1_baseline_surv_cox^exp(iecv_xb) 
+summ iecv_risk10yr, det 
+running period2_pseudo iecv_risk10yr, ci leg(off) nopts addplot(function y=x) ysc(range(0 1)) xsc(range(0 1))  //
+ylab(0(.2)1) xlab(0(.2)1) title("Smoothed calibration plot - Cox proportional hazards model", size(small)) //
+xtitle("Predicted event probability") ytitle("Observed event probability") graphregion(color(white)) aspect(1)
+
+graph save "Graph" "\graphs\ep3_cox\EP3_cox_smoothed_calibration.gph", replace 
+
+* Risk groups calibration plot * 
+pmcalplot iecv_risk10yr if period==2, ci surv t(10) bin(20) nospike //
+xtitle("Predicted event probability", size(small)) ytitle("Observed event probability", size(small)) graphregion(color(white))//
+title("Calibration plot - Cox proportional hazards model", size(small))
+
+graph save "Graph" "\graphs\ep3_cox\EP3_cox_riskgroups_calibration.gph", replace
+
+clear 
+
+* Reopen the long format dataset so that all imputations can be used * 
+use "\final_datasets\OX129_endpoint3_imputed_IECV.dta", clear 
+
+* Discrimination * 
+* somersd command assumes higher score = better survival * 
+* Exponentiate in case any predictions equal 0 * 
+gen iecv_hr = exp(iecv_xb) 
+* Then take the inverse * 
+gen iecv_invhr = 1/iecv_hr  
+* Censoring indicator made * 
+gen censind = 1-_d if _st==1
+mi estimate, cmdok dots: somersd _t iecv_invhr if _st==1, cenind(censind) tdist transf(c)
+
+
+*******************************
+* Performance by ethnic group * 
+*******************************
+* Discrimination in different ethnic groups * 
+* As ethnicity was imputed, ethnicity per person may vary across imputations - capture this * 
+forval x = 1(1)9 {
+	mi estimate, cmdok dots esampvaryok: somersd _t iecv_invhr if (_st==1 & period==2 & ethriskid==`x'), cenind(censind) tdist transf(c)
+  }
+
+* Calibration slope * 
+forval x = 1(1)9 { 
+	mi estimate, dots esampvaryok: stcox iecv_xb if ethriskid==`x', vce(cluster study_practice)
+}
+
+* Calibration in the large * 
+forval x = 1(1)9 { 
+	mi estimate, dots esampvaryok: stcox iecv_xb if ethriskid==`x', offset(iecv_xb) vce(cluster study_practice)
+}
+
+
+**************************************************
+**     Region-level heterogeneity and results   **
+**************************************************
+* Form a small dataset file for each metric - this will contain the region-level estimates of kery metrics * 
+* These are then used later for the random effects meta-analysis pooling * 
+
+cd "\estimates\" 
+
+***************************
+* GT IECV for Harrell's C *
+
+capture postutil clear   
+tempname C_EP3regioncox
+postfile `C_EP3regioncox' beta st_err val_size using C_EP3regioncox.dta , replace 
+  
+  forval x = 1(1)10 {
+  mi estimate, cmdok dots: somersd _t iecv_invhr if (_st==1 & sha1==`x' & period==2), cenind(censind) tdist transf(c) 
+  local beta = r(table)[1,1]
+  local st_err = r(table)[2,1]
+  local val_size = e(N)
+  post `C_EP3regioncox' (`beta') (`st_err') (`val_size')
+  }
+  
+  postclose `C_EP3regioncox' 
+  
+*********************************
+* GT IECV for calibration slope *
+
+capture postutil clear   
+tempname slope_EP3regioncox
+postfile `slope_EP3regioncox' slope slope_se val_size using slope_EP3regioncox.dta , replace 
+  
+  forval x = 1(1)10 {
+  mi estimate, dots: stcox iecv_xb if sha1==`x', vce(cluster study_practice)
+  local slope = r(table)[1,1]
+  local slope_se = r(table)[2,1]
+  local val_size = e(N)
+  post `slope_EP3regioncox' (`slope') (`slope_se') (`val_size')
+  }
+  
+  postclose `slope_EP3regioncox' 
+  
+****************************************
+* GT IECV for calibration-in-the-large *
+
+capture postutil clear   
+tempname citl_EP3regioncox
+postfile `citl_EP3regioncox' citl citl_se val_size using citl_EP3regioncox.dta , replace 
+  
+  forval x = 1(1)10 { 
+  mi estimate, dots: stcox iecv_xb if sha1==`x', offset(iecv_xb) vce(cluster study_practice)
+  local citl = r(table)[1,1]
+  local citl_se = r(table)[2,1]
+  local val_size = e(N)
+  post `citl_EP3regioncox' (`citl') (`citl_se') (`val_size')
+  }
+  
+  postclose `citl_EP3regioncox'
+ 
+save "\final_datasets\OX129_endpoint3_IECV.dta", replace 
+
+* For events/denominators in meta-analysis graphs * 
+tab sha1 _d if period==2 & _mi_m==1       \\ tabulate region, number of events in period 2 data, in a single imputation 
+
+clear 
+
+********************************************************************************
+
+
+*****************
+* Meta-analyses *
+***************** 
+
+** Random effects meta-analysis pooled performance metrics * 
+use "\estimates\C_EP3regioncox.dta", clear 
+
+* Input new variable with region name, number of events, number of total individuals * 
+
+input str80 region
+"East Midlands (464/3,337)"
+"East of England (543/4,826)"
+"London (1,270/13,287)"
+"North East (387/2,784)"
+"North West (1,664/15,419)"
+"South Central (1,062/11,272)"
+"South East (848/8,666)"
+"South West (1,054/10,165)"
+"West Midlands (1,032/8,678)"
+"Yorkshire & Humber (484/3,946)"
+end
+meta set beta st_err, studylab(region)
+meta summarize, random(sjonkman) se(khartung) predinterval(95)
+meta forestplot, random(sjonkman) se(khartung) predinterval(95) 
+graph save "Graph" "\graphs\EP3_harrellsC_cox.gph", replace 
+clear 
+
+use "\estimates\slope_EP3regioncox.dta" , clear 
+input str80 region
+"East Midlands (464/3,337)"
+"East of England (543/4,826)"
+"London (1,270/13,287)"
+"North East (387/2,784)"
+"North West (1,664/15,419)"
+"South Central (1,062/11,272)"
+"South East (848/8,666)"
+"South West (1,054/10,165)"
+"West Midlands (1,032/8,678)"
+"Yorkshire & Humber (484/3,946)"
+end
+meta set slope slope_se, studylab(region)
+meta summarize, random(sjonkman) se(khartung) predinterval(95)
+meta forestplot, random(sjonkman) se(khartung) predinterval(95) xline(1)
+graph save "Graph" "\graphs\EP3_slope_cox.gph", replace 
+clear
+
+use "\estimates\citl_EP3regioncox.dta" , clear 
+input str80 region
+"East Midlands (464/3,337)"
+"East of England (543/4,826)"
+"London (1,270/13,287)"
+"North East (387/2,784)"
+"North West (1,664/15,419)"
+"South Central (1,062/11,272)"
+"South East (848/8,666)"
+"South West (1,054/10,165)"
+"West Midlands (1,032/8,678)"
+"Yorkshire & Humber (484/3,946)"
+end
+meta set citl citl_se, studylab(region)
+meta summarize, random(sjonkman) se(khartung) predinterval(95)
+meta forestplot, random(sjonkman) se(khartung) predinterval(95) xline(0)
+graph save "Graph" "\graphs\EP3_citl_cox.gph", replace 
+clear
+
+*********************
+** Meta-regression **
+*********************
+
+* Form collapsed dataset which contains the region-level factors (period 2 data) to be explored in meta-reg *
+
+use "\final_datasets\OX129_endpoint3_imputed_IECV.dta" , clear 
+keep if period==2 
+gen nonwhite = 0
+replace nonwhite=1 if (ethriskid!=. & ethriskid>1)
+gen age1 = age_at_diagnosis
+gen baseline_bmi1 = diagnosis_bmi
+gen town_int1 = town_int
+
+collapse (mean)age_at_diagnosis diagnosis_bmi town_int (sd)age1 baseline_bmi1 town_int1 (percent)nonwhite, by(sha1)
+
+tab age_at_diagnosis 
+tab diagnosis_bmi 
+tab town_int 
+tab age1
+tab baseline_bmi1 
+tab town_int1 
+tab nonwhite
+
+save "\final_datasets\OX129_regionalperiod2_EP3.dta", replace 
+clear 
+
+
+**********************************************************************************
+* Examine effect of age, BMI, deprivation and non-white ethnicity on perf hetero *
+********************************************************************************** 
+
+*****************
+** Harrell's C **  
+use "\estimates\C_EP3regioncox.dta"
+gen sha1 = _n 
+merge 1:1 sha1 using "\final_datasets\OX129_regionalperiod2_EP3.dta"
+
+meta set beta st_err, studylab(sha1)
+
+meta regress age_at_diagnosis diagnosis_bmi town_int nonwhite, random(sjonkman) se(khartung)
+meta regress age1 baseline_bmi1 town_int nonwhite, random(sjonkman) se(khartung)
+
+meta regress age_at_diagnosis, random(sjonkman)
+estat bubbleplot 
+graph save "Graph" "\ep3_cox\bubbleplot_EP3_C_age_cox.gph", replace 
+
+meta regress age1, random(sjonkman)
+estat bubbleplot 
+graph save "Graph" "\ep3_cox\bubbleplot_EP3_C_ageSD_cox.gph", replace 
+
+meta regress town_int, random(sjonkman)
+estat bubbleplot 
+graph save "Graph" "\ep3_cox\bubbleplot_EP3_C_townsend_cox.gph", replace 
+
+meta regress nonwhite, random(sjonkman)
+estat bubbleplot 
+graph save "Graph" "\ep3_cox\bubbleplot_EP3_C_ethnic_cox.gph", replace 
+
+meta regress diagnosis_bmi, random(sjonkman)
+estat bubbleplot 
+graph save "Graph" "\ep3_cox\bubbleplot_EP3_C_bmi_cox.gph", replace 
+
+meta regress baseline_bmi, random(sjonkman)
+estat bubbleplot 
+graph save "Graph" "\ep3_cox\bubbleplot_EP3_C_bmiSD_cox.gph", replace 
+
+clear 
+
+
+***********************
+** Calibration slope ** 
+use "\estimates\slope_EP3regioncox.dta"
+gen sha1 = _n 
+merge 1:1 sha1 using "\final_datasets\OX129_regionalperiod2_EP3.dta"
+
+meta set slope slope_se, studylab(sha1)
+
+meta regress age_at_diagnosis diagnosis_bmi town_int nonwhite, random(sjonkman) se(khartung)
+meta regress age1 baseline_bmi1 town_int nonwhite, random(sjonkman) se(khartung)
+
+meta regress age_at_diagnosis, random(sjonkman)
+estat bubbleplot 
+graph save "Graph" "\ep3_cox\bubbleplot_EP3_slope_age_cox.gph", replace 
+
+meta regress age1, random(sjonkman)
+estat bubbleplot 
+graph save "Graph" "\ep3_cox\bubbleplot_EP3_slope_ageSD_cox.gph", replace 
+
+meta regress town_int, random(sjonkman)
+estat bubbleplot 
+graph save "Graph" "\ep3_cox\bubbleplot_EP3_slope_townsend_cox.gph", replace 
+
+meta regress nonwhite, random(sjonkman)
+estat bubbleplot 
+graph save "Graph" "\ep3_cox\bubbleplot_EP3_slope_ethnic_cox.gph", replace 
+
+meta regress diagnosis_bmi, random(sjonkman)
+estat bubbleplot 
+graph save "Graph" "\ep3_cox\bubbleplot_EP3_slope_bmi_cox.gph", replace 
+
+meta regress baseline_bmi, random(sjonkman)
+estat bubbleplot 
+graph save "Graph" "\ep3_cox\bubbleplot_EP3_slope_bmiSD_cox.gph", replace 
+
+clear 
+
+
+******************************
+** Calibration in the large ** 
+
+use "\estimates\citl_EP3regioncox.dta"
+gen sha1 = _n 
+merge 1:1 sha1 using "\final_datasets\OX129_regionalperiod2_EP3.dta"
+
+meta set citl citl_se, studylab(sha1)
+
+meta regress age_at_diagnosis diagnosis_bmi town_int nonwhite, random(sjonkman) se(khartung)
+meta regress age1 baseline_bmi1 town_int nonwhite, random(sjonkman) se(khartung)
+
+meta regress age_at_diagnosis, random(sjonkman)
+estat bubbleplot 
+graph save "Graph" "\ep3_cox\bubbleplot_EP3_citl_age_cox.gph", replace 
+
+meta regress age1, random(sjonkman)
+estat bubbleplot 
+graph save "Graph" "\ep3_cox\bubbleplot_EP3_citl_ageSD_cox.gph", replace 
+
+meta regress town_int, random(sjonkman)
+estat bubbleplot 
+graph save "Graph" "\ep3_cox\bubbleplot_EP3_citl_townsend_cox.gph", replace 
+
+meta regress nonwhite, random(sjonkman)
+estat bubbleplot 
+graph save "Graph" "\ep3_cox\bubbleplot_EP3_citl_ethnic_cox.gph", replace 
+
+meta regress diagnosis_bmi, random(sjonkman)
+estat bubbleplot 
+graph save "Graph" "\ep3_cox\bubbleplot_EP3_citl_bmi_cox.gph", replace 
+
+meta regress baseline_bmi, random(sjonkman)
+estat bubbleplot 
+graph save "Graph" "\ep3_cox\bubbleplot_EP3_citl_bmiSD_cox.gph", replace 
+
+clear 
+
+
+********************************************************************************
+********************************************************************************
+******************************************************************************** 
+

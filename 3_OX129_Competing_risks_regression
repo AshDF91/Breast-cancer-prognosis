@@ -49,7 +49,7 @@ summ time, det
 stset time, failure(endpoint==1) exit(time 10)                                    \\ stpci command for pseudovalues automatically assumes 
                                                                                   \\ the other ategory of endpoint is the competing one 
 cd "\ado\plus\"
-stpci, at(10)                                                                      \\ estimate jack-knife pseudovalues for Nelson-Aalen CIF at 10 years 
+stpci, at(10)                                                                      \\ estimate jack-knife pseudovalues for Aalen-Johanssen CIF at 10 years 
 summ pseudo, det 
 
 * Fractional polynomials for age, BMI at diagnosis, and Townsend score * 
@@ -119,7 +119,7 @@ replace time = time/365.25
 mi stset time, failure(endpoint==1) exit(time 10)
 
 cd "\ado\plus\"
-stpci, at(10)                                                                \\ Nelson-Johanssen cumulative incidence function at 10 years
+stpci, at(10)                                                                \\ Aalen-Johanssen cumulative incidence function at 10 years
 summ pseudo, det 
 
 * Perform predictor selection * 
@@ -161,7 +161,7 @@ parmest, list(,) saving(CR_endpoint3_parmest.dta, replace) label eform for(estim
 mi stset time if period==2, failure(endpoint==0) exit(time 10)                                      // Code inspired by ado file for Stata command 'stbrier'
 sts gen basechazard = na 
 gen base_ipcw = . 
-summ basechazard if _t==10                                                                          // Nelseon-Aalen cumulative hazard for censoring at 10 years 
+summ basechazard if _t==10                                                                          // Nelson-Aalen cumulative hazard for censoring at 10 years 
 replace base_ipcw = r(mean) if period==2 
 
 global covariates = "Iage___2 Iage___3 Idiag* i.ethriskid i.smoke_cat ib6.cancer_route ib2.progesterone //

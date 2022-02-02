@@ -1,1 +1,344 @@
-neural nets 
+## Neural network (competing risks) modelling ##
+
+## Same overall process as XGBoost - use stacked imputed datasets, fit model to entire data, 
+## evaluate using internal-external cross-validation that recapitulates hyperparameter tuning (nested)
+
+
+#############################
+## Load in packages needed ##
+#############################
+library(survival)
+library(readr)
+library(stringr)
+library(caret)
+library(haven)
+library(ParBayesianOptimization) 
+library(keras)
+library(tensorflow)
+
+########################################################
+## Check and set working directory for importing data ##
+########################################################
+getwd() 
+setwd("/final_datasets/ML/")
+
+##################
+## Load in data ##
+##################
+data <- read_dta("OX129_endpoint3_stacked50_pseudovalues.dta")
+str(data)
+
+#########################
+## Variable formatting ##
+#########################
+## Categorical variables need to be converted into dummy variables ##
+## First, reformat relevant parameters as factors, then convert to dummies ##
+
+data$ethriskid <- factor(data$ethriskid)                      # Ethnicity 
+data$smoke_cat <- factor(data$smoke_cat)                      # Smoking status 
+data$cancer_route <- factor(data$cancer_route)                # Route to diagnosis
+data$progesterone_status <- factor(data$progesterone_status)  # PR +/-
+data$HER2_status <- factor(data$HER2_status)                  # HER2 +/-/borderline 
+data$radiotherapy <- factor(data$radiotherapy)                # Use of RTx in 1st year 
+data$mastectomy <- factor(data$mastectomy)                    # Mastectomy in 1st year  
+data$chemotherapy <- factor(data$chemotherapy)                # Chemo in 1st year 
+data$other_surgery <- factor(data$other_surgery)              # Other surgery in 1st year 
+data$cancer_stage <- factor(data$cancer_stage)                # Stage (I-IV)
+data$cancer_grade <- factor(data$cancer_grade)                # Grade (differentiation)
+data$hrt <- factor(data$hrt)                                  # Hormone replacement therapy use
+data$vasculitis <- factor(data$vasculitis)                    # Recorded diagnosis of vasculitis 
+data$sha1 <- factor(data$sha1)                                # Region - used for IECV
+
+## Now, start converting these factors to dummies ##
+## Set up list of parameters that need dummies ##
+dummy_parameters <- c('ethriskid', 'smoke_cat', 'radiotherapy', 'hrt', 
+                      'cancer_stage','cancer_grade', 'progesterone_status', 
+                      'HER2_status', 'cancer_route', 'vasculitis')
+
+## The others will be hamdled as binary ##
+## Generate the dummies ##
+dummies <- dummyVars(~ethriskid + smoke_cat + radiotherapy + mastectomy + 
+                       chemotherapy + other_surgery + hrt + cancer_stage + 
+                       cancer_grade + progesterone_status + HER2_status + 
+                       cancer_route + vasculitis,  data = data)
+
+## Package the dummy variables into its own dataset, ready to bind with the ##
+## other, non-dummy parameters ##
+dummied <- as.data.frame(predict(dummies, newdata=data))
+
+## Form the ready-to-process dataset by binding the new dummies with the other 
+#numeric parameters ##
+data_for_model <- cbind(data[, -c(which(colnames(data) %in% dummy_parameters))], 
+                        dummied)
+
+## Create normalise function - continuous variables are to be normalised/scaled 
+## to be between 0 and 1 ##
+
+normalise <- function(x) {
+  return ((x - min(x)) / (max(x) - min(x)))
+}
+
+data_for_model$age_at_diagnosis  <- normalise(data_for_model$age)
+data_for_model$bmi               <- normalise(data_for_model$bmi)
+
+## Set up the predictors ('x cols') and outcome ('y cols') ##
+## Rename variables (inc. new dummies) where relevant for interpretation ##
+colnames(data_for_model)[colnames(data_for_model) == 'ethriskid.1'] <- 'White_ethnicity'
+colnames(data_for_model)[colnames(data_for_model) == 'ethriskid.2'] <- 'Indian_ethnicity'
+colnames(data_for_model)[colnames(data_for_model) == 'ethriskid.3'] <- 'Pakistani_ethnicity'
+colnames(data_for_model)[colnames(data_for_model) == 'ethriskid.4'] <- 'Bangladeshi_ethnicity'
+colnames(data_for_model)[colnames(data_for_model) == 'ethriskid.5'] <- 'Other_Asian_ethnicity'
+colnames(data_for_model)[colnames(data_for_model) == 'ethriskid.6'] <- 'Black_Caribbean_ethnicity'
+colnames(data_for_model)[colnames(data_for_model) == 'ethriskid.7'] <- 'Black_African_ethnicity'
+colnames(data_for_model)[colnames(data_for_model) == 'ethriskid.8'] <- 'Chinese_ethnicity'
+colnames(data_for_model)[colnames(data_for_model) == 'ethriskid.9'] <- 'Other_ethnicity'
+colnames(data_for_model)[colnames(data_for_model) == 'smoke_cat.0'] <- 'Non_smoker'
+colnames(data_for_model)[colnames(data_for_model) == 'smoke_cat.1'] <- 'Ex_smoker'
+colnames(data_for_model)[colnames(data_for_model) == 'smoke_cat.2'] <- 'Light_smoker'
+colnames(data_for_model)[colnames(data_for_model) == 'smoke_cat.3'] <- 'Moderate_smoker'
+colnames(data_for_model)[colnames(data_for_model) == 'smoke_cat.4'] <- 'Heavy_smoker'
+colnames(data_for_model)[colnames(data_for_model) == 'radiotherapy.1'] <- 'Radiotherapy'
+colnames(data_for_model)[colnames(data_for_model) == 'mastectomy.1'] <- 'Mastectomy'
+colnames(data_for_model)[colnames(data_for_model) == 'chemotherapy.1'] <- 'Chemotherapy'
+colnames(data_for_model)[colnames(data_for_model) == 'other_surgery.1'] <- 'Other_surgery'
+colnames(data_for_model)[colnames(data_for_model) == 'hrt.1'] <- 'HRT_use'
+colnames(data_for_model)[colnames(data_for_model) == 'cancer_stage.1'] <- 'Stage1'
+colnames(data_for_model)[colnames(data_for_model) == 'cancer_stage.2'] <- 'Stage2'
+colnames(data_for_model)[colnames(data_for_model) == 'cancer_stage.3'] <- 'Stage3'
+colnames(data_for_model)[colnames(data_for_model) == 'cancer_stage.4'] <- 'Stage4'
+colnames(data_for_model)[colnames(data_for_model) == 'cancer_grade.1'] <- 'Well_differentiated'
+colnames(data_for_model)[colnames(data_for_model) == 'cancer_grade.2'] <- 'Moderately_differentiated'
+colnames(data_for_model)[colnames(data_for_model) == 'cancer_grade.3'] <- 'Poorly_differentiated'
+colnames(data_for_model)[colnames(data_for_model) == 'progesterone_status.2'] <- 'PR_positive'
+colnames(data_for_model)[colnames(data_for_model) == 'HER2_status.1'] <- 'HER2_negative'
+colnames(data_for_model)[colnames(data_for_model) == 'HER2_status.2'] <- 'HER2_positive'
+colnames(data_for_model)[colnames(data_for_model) == 'HER2_status.3'] <- 'HER2_borderline'
+colnames(data_for_model)[colnames(data_for_model) == 'cancer_route.2'] <- 'Emergency_presentation'
+colnames(data_for_model)[colnames(data_for_model) == 'cancer_route.3'] <- 'GP_referral'
+colnames(data_for_model)[colnames(data_for_model) == 'cancer_route.4'] <- 'Inpatient_elective'
+colnames(data_for_model)[colnames(data_for_model) == 'cancer_route.5'] <- 'Other_outpatient_pathway'
+colnames(data_for_model)[colnames(data_for_model) == 'cancer_route.6'] <- 'Screening_detected'
+colnames(data_for_model)[colnames(data_for_model) == 'cancer_route.7'] <- 'Two_week_wait'
+colnames(data_for_model)[colnames(data_for_model) == 'vasculitis.1'] <- 'Vasculitis'
+
+## 'pseudo' are the jack-knife pseudo-values for the A-J CIF ##
+x_cols <-  c('age_at_diagnosis', 'bmi', 'White_ethnicity', 'Indian_ethnicity', 
+             'Pakistani_ethnicity', 'Bangladeshi_ethnicity', 'Other_Asian_ethnicity', 
+             'Black_Caribbean_ethnicity', 'Black_African_ethnicity', 'Chinese_ethnicity', 
+             'Other_ethnicity', 'Non_smoker', 'Ex_smoker', 'Light_smoker', 
+             'Moderate_smoker', 'Heavy_smoker', 'Radiotherapy', 'Mastectomy', 
+             'Chemotherapy', 'Other_surgery', 
+             'HRT_use', 'Stage1', 'Stage2', 'Stage3', 'Stage4', 'Well_differentiated', 
+             'Moderately_differentiated', 'Poorly_differentiated', 'PR_positive', 
+             'HER2_negative', 'HER2_positive', 'HER2_borderline',  
+             'Emergency_presentation', 'GP_referral', 'Inpatient_elective', 
+             'Other_outpatient_pathway', 'Screening_detected', 'Two_week_wait', 
+             'Vasculitis')
+y_cols <- c('pseudo')
+
+## Clean up environment to avoid issues with memory ##
+rm(dummied) 
+rm(data) 
+
+
+########################
+## Dataset formatting ##
+########################
+
+## Change dataset to a matrix  ##
+## x_train = predictor parameters ##
+x_train <- as.matrix(data_for_model[, x_cols])
+
+## Labels = the target for the neural net - the pseudovalues ##
+label_train <- as.matrix(data_for_model[, y_cols])
+
+## Weights = observation weights for stacked imputations, all = 0.02 ##
+weights <- as.matrix(data_for_model$imp_weight)
+
+## Number of input neurons (predictor parameters) 
+dim(x_train) 
+
+
+###############################################
+## Define custom loss function for the model ##
+###############################################
+
+## Define root mean squared error loss function ##
+## This is used to fit the neural network model ##
+
+rmse <- function(y_true, y_pred){
+  K <- backend()
+  loss <- K$sqrt(K$mean((y_true - y_pred)^2))
+  return(loss)
+}
+
+############################################################################
+## FULL MODEL: Setting up Bayesian optimisation for hyperparameter tuning ##
+############################################################################
+
+## First, we fit neural network to entirety of data; Bayesian optimisation ## 
+## used to identify optimal hyperparameters (with nested cross-val) ##
+
+## 1066 used throughout for reproducibility ##
+set.seed(1066)
+
+## The Bayesian Optimisation package requires a 'scoring function' which ##
+## it uses to assess the performance of the different configurations ##
+
+## Herein, we specify that we want to tune the number of epochs, degree of ##
+## L2 regularisation, number of units in each hidden layer, and number of ##
+## hidden layers ##
+## To estimate the performance of each model configuration, we use 5-fold ##
+## cross-validation, so we nest a loop inside the scoring function so that ##
+## the 'score' returned is a cross-validated estimate ##
+
+scorefunction <- function(epochs, regularisation, units, layers, learnrate) {
+  
+  set.seed(1066)
+  
+  k <- 5                                                                      ## 5-fold cross-validation 
+  indices <- sample(1:nrow(x_train))                                          ## Used to randomly assign to folds 
+  folds <- cut(1:length(indices), breaks = k, labels = FALSE)                 ## folds 
+  
+  cv_score <- c()                                                             ## empty list to store 'scores' over each CV iteration 
+  
+  for (i in 1:k) {                                                            ## Nested loop to perform CV
+    
+    cv_val_indices     <- which(folds==i)                                     ## validation set 1/5 folds 
+    cv_val_data        <- x_train[cv_val_indices, ]                           ## Take from x_train 
+    cv_val_labels      <- label_train[cv_val_indices]                         ## Take from labels 
+    
+    cv_train_data      <- x_train[-cv_val_indices, ]                          ## Train data = 4/5 folds
+    cv_train_labels    <- label_train[-cv_val_indices]                        ## Train labels 4/5 
+    
+    cv_model <- keras_model_sequential()                                      ## Instantiate keras model 
+    for(m in 1:layers){                                                       ## loop added to vary number of hidden layers
+      cv_model %>% 
+        layer_dense(units = units, activation = 'relu', 
+                    regularizer_l2(regularisation), input_shape=c(39))
+    }
+    cv_model %>% layer_dense(units = 1, activation = "linear") %>% 
+      compile(
+        optimizer = optimizer_adam(lr=learnrate),  
+        loss = rmse,                                                          ## Use the above defined custom loss function
+        metrics = "mae"                                                       ## Reported as model fits, but not a loss function 
+      )
+    ## Fit the model- batch size= 1024, weights applied for loss function ##
+    cv_model %>% fit(cv_train_data, cv_train_labels, epochs=epochs, 
+                     batch_size=1024, verbose=2, sample_weights=weights)  
+    
+    ## Generate predictions on held-out fold ##
+    cv_predictions <- predict(cv_model, cv_val_data)
+    
+    ## BO wants to find the maximum, but lower RMSE = better ##
+    ## -1 x RMSE: lower RMSE = higher value, so use this to score the config ##
+    negative_rmse <- -1*sqrt((mean((cv_predictions-cv_val_labels)^2)))
+    
+    ## Internal function to coerce any result from an exploding gradient to be non-infinite
+    ## which would break the Bayesian Optimisation function/package 
+    ## Instead of returning a score of infinity, clip it to be -10
+    exploding_fix <- function(negative_rmse, limit=-10){
+       if(is.finite(negative_rmse)==FALSE){
+         negative_rmse <- limit
+       }
+      if(is.nan(negative_rmse)==TRUE){
+        negative_rmse <- limit
+      }
+      return(negative_rmse)
+    }
+    
+    negative_rmse <- exploding_fix(negative_rmse)                              ## This has never been needed thus far...!
+    
+    # Return score (or clipped score, if gradient exploded) to bayesian_neural 
+    cv_score <- c(cv_score, negative_rmse)
+    
+    ## Clear out the model at the end of loop to avoid merging ##
+    rm(cv_model) 
+  }
+  ## BO needs score to be returned to it ##
+  return(list(Score = mean(cv_score)))
+}
+
+
+## Define hyperparameter search space - 'bounds' to search ##
+
+bounds <- list(
+  epochs = c(1L, 20L),                                                        ## Number of times model gets fed the data
+  regularisation = c(0.00001, 0.2),                                           ## L2 reg: against overfitting
+  units = c(41L, 200L),                                                       ## Number of nodes in each layer 
+  layers = c(1L, 5L),                                                         ## Between 1 and 5 hidden layers
+  learnrate = c(0.0001, 0.1)  
+)
+
+###############################################################################
+## FULL MODEL: Running Bayesian optimisation to find optimal hyperparameters ##
+###############################################################################
+
+## Define Bayesian Optimisation function and run it ##
+## Also keep track of time ##
+start <- Sys.time() 
+
+## Function takes in the scoring function we defined above, the bounds to ##
+## search within, number of 'initialisations' to run first, then the number ## 
+## of further iterations to try find the global optimum ##
+
+bayesian_neural <- bayesOpt(
+  FUN = scorefunction, 
+  bounds = bounds, 
+  initPoints = 15, 
+  iters.n = 25, 
+  iters.k = 1, 
+  parallel = FALSE, 
+  plotProgress = TRUE, 
+  verbose = 2, 
+  errorHandling = "continue"
+)
+
+end <- Sys.time() 
+end-start 
+
+## Summarise Bayesian Optimisation run ##
+bayesian_neural$scoreSummary 
+
+bestpars <- getBestPars(bayesian_neural)
+bestpars 
+
+# Extract optimal hyperparameter config to fit final model on whole dataset # 
+best_epochs <- bestpars[1]
+best_regularisation <- bestpars[2]
+best_units <- bestpars[3]
+best_layers <- toString(bestpars[4])
+best_learnrate <- as.numeric(bestpars[5]) 
+
+## Use same format as above - define the 'final_model' and fit it ##
+final_model <- keras_model_sequential() 
+for(i in 1:best_layers){
+  final_model %>% 
+    layer_dense(units = best_units, activation = 'relu', 
+                regularizer_l2(best_regularisation$best_regularisation), 
+                input_shape=c(39))
+}
+final_model %>% layer_dense(units = 1, activation = "linear") %>% 
+  compile(
+    optimizer = optimizer_adam(lr=best_learnrate), 
+    loss = rmse, 
+    metrics = "mae"
+  )
+
+## Basic characteristics of final model, e.g. number of layers, parameters ##
+summary(final_model) 
+
+############################
+# Fit final neural network #
+############################
+
+## Fit the model with said config to whole dataset, and save it ##
+final_model %>% fit(x_train, label_train, epochs=best_epochs, 
+                    batch_size=1024, verbose=1, sample_weights=weights)
+                    
+## Save the model ##
+setwd("/models/Endpoint_3/")    
+save_model_hdf5(final_model, "ep3_neuralnetwork_final.h5")
+
+###############################################################################################
+###############################################################################################

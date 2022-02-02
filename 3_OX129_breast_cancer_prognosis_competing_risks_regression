@@ -1,1 +1,653 @@
-CRR approach 
+## Competing risks regression modelling ##
+
+
+## Multiple imputation has already been carried out in accordance with principles
+## for Cox models (e.g. including endpoint, Nelson-Aalen cumulative hazard function ##
+
+## Strategy here is, using the same set of 50 imputations, to permit and identify optimal FP terms 
+## for age/BMI/Townsend score for a pseudo-observations-based competing risks regression model, 
+## then conduct the model fitting and IECV thereafter ## 
+
+
+********************************************************************************
+*              1) Fractional polynomials, predictor selection                  *
+********************************************************************************
+
+* As candidate predictors may have different associations with the outcome in a 
+* competing risks, pseudovalues-based model, we start with the 'raw data' and 
+* repeat the processing steps to: 
+* Find the optimal FP terms for age, BMI, Townsend
+
+* Start with the imputed dataset used for IECV in previous Cox modelling * 
+use "\final_datasets\OX129_endpoint3_imputed_IECV.dta", clear 
+count 
+
+* Extract complete case data, so we can start again * 
+mi extract 0 
+drop Iage___1 Iage___2 Itown__1 Idiag__1 Idiag__2 Inode__1 Inode__2 Inodea_1 Inodea_2    \\ drop previously generated FP terms for Cox model
+* Drop all previously calculated baselines, pseudovalues, linear predictors, etc. * 
+drop baseline_surv baseline_surv_10yr risk10yr censind timesplit iecv_event iecv_xb time hr townsend      \\ keep clear and clean 
+
+* Stset the data, estimate pseudovalues for the cumulative incidence function *  
+* exit3status = contains all cause death (use to define competing event)
+tab d_breastcancer                                                                \\ 1=breast cancer-related death, 0 = no
+tab exit3status                                                                   \\ 1 = death from any cause, 0 = censored/left alive
+la de endpoints 0 "Censored" 1 "Breast cancer death" 2 "Competing death"
+gen endpoint = 0 
+replace endpoint = 1 if d_breastca==1                                              \\ Died, and breast cancer was on death certificate 
+replace endpoint = 2 if exit3status==1 & d_breastca!=1                             \\ Died, but not from breast cancer
+la val endpoint endpoints 
+tab endpoint 
+
+* Make time variable - unit is years * 
+gen time = exit3date - outcomedate6                                               \\ Date of exit/death, minus date of breast cancer diagnosis 
+replace time = time/365.25
+summ time, det 
+
+* Stset the data - unrestricted timeframe. Will use this to define competing
+* events, breast cancer deaths, and compete the CIF pseudovalues at 10years  
+stset time, failure(endpoint==1) exit(time 10)                                    \\ stpci command for pseudovalues automatically assumes 
+                                                                                  \\ the other ategory of endpoint is the competing one 
+cd "\ado\plus\"
+stpci, at(10)                                                                      \\ estimate jack-knife pseudovalues for Nelson-Aalen CIF at 10 years 
+summ pseudo, det 
+
+* Fractional polynomials for age, BMI at diagnosis, and Townsend score * 
+mfp, all: glm pseudo age_at_diagnosis diagnosis_bmi town_int                       \\ In complete case data, as was done for Cox model 
+                                                                                   \\ Sometimes there is non-convergence with the cloglog - use the linear version for FPs 
+
+* Review FP terms returned - age and BMI have non-linear terms, Townsend = 1 * 
+* Age = 1, 2  (different than Cox model)
+* BMI at diagnosis = -2, -2 (same as Cox model)
+* Townsend = 1, so keep linear. Let's 'undo' the scaling, and drop Itown
+drop Itown__1  
+
+* Plotting FP terms for the competing risks models * 
+glm pseudo Iage*, link(cloglog) irls                                              \\ Model on cloglog scale, iteratively weighted least squares for maximisation
+predict age_fp, xb                                                                \\ predict model linear predictor 
+replace age_fp = 1 - exp(-exp(age_fp))                                            \\ complementar log-log transform of linear predictor = probabililty 
+twoway fpfitci age_fp age_at_diagnosis, ytitle("Predicted event probability") xtitle("Age at diagnosis")
+graph save "Graph" "\graphs\ep3_competing\FP_terms_age.gph", replace 
+
+glm pseudo Idiag*, link(cloglog) irls                                             \\ Repeat this, but for BMI with its FP terms 
+predict bmi_fp, xb 
+replace bmi_fp = 1 - exp(-exp(bmi_fp))
+twoway fpfitci bmi_fp diagnosis_bmi, ytitle("Predicted event probability") xtitle("Body mass index at diagnosis")
+graph save "Graph" "\graphs\ep3_competing\FP_terms_bmi.gph", replace 
+
+
+* Now we know the functional forms, and that they are very similar (one FP term
+* for age is different, and easily coded), we can generate this new term in the 
+* imputed dataset that we have previously generated. 
+
+* close this dataset, then move on to core dataset for endpoint 3 *
+clear 
+
+********************************************************************************
+
+use "\final_datasets\OX129_endpoint3_imputed_IECV.dta", clear                     \\ Same set of 50 imputations used for Cox models 
+count 
+
+* Drop all previously calculated baselines, pseudovalues, linear predictors, etc. * 
+drop baseline_surv baseline_surv_10yr risk10yr censind timesplit iecv_event iecv_xb time townsend     \\ Clear out variables 
+
+* Generate the new FP term for age - we will have FP terms (1,2) for CR model* 
+gen Iage___3 = (age_at_diagnosis/10)-6.301833523                                   
+summ Iage___3, det 
+* Does not need registering as imputed as age is complete for all * 
+
+* Convert imputed town_int vars to original scale * 
+mi passive: gen townsend = Itown__1 - 0.5719195882                               \\ FP power was 1, so mfp centered it. Undo. 
+
+* Stset the data, estimate pseudovalues for the cumulative incidence function *  
+* exit3status = contains all cause death (use to define competing event)
+tab d_breastcancer 
+tab exit3status
+la de endpoints 0 "Censored" 1 "Breast cancer death" 2 "Competing death"
+gen endpoint = 0 
+replace endpoint = 1 if d_breastca==1                                            \\ Same as above
+replace endpoint = 2 if exit3status==1 & d_breastca!=1 
+la val endpoint endpoints 
+tab endpoint 
+
+* Make time variable * 
+gen time = exit3date - outcomedate6
+replace time = time/365.25
+
+* Stset the data - unrestricted timeframe. Will use this to define competing
+* events, breast cancer deaths, and compete the CIF pseudovalues at 10years  
+mi stset time, failure(endpoint==1) exit(time 10)
+
+cd "\ado\plus\"
+stpci, at(10)                                                                \\ Nelson-Johanssen cumulative incidence function at 10 years
+summ pseudo, det 
+
+* Perform predictor selection * 
+* Fit the 'full' model - generalised linear model with cloglog link functon to approximate Fine-Gray; iteratively rewighted least squares for maximisation 
+* Robust standard errors in view of non-independence of pseudovalues * 
+
+timer on 1 
+mi estimate, dots eform: glm pseudo Iage___2 Iage___3 Idiag* townsend i.ethriskid i.smoke_cat ib6.cancer_route //
+ib2.progesterone ib2.HER2 i.fh_breastca i.radio i.chemo i.mastect i.other_surg i.cancer_stage i.cancer_grade i.ckd //
+i.htn i.ihd i.cirrhosis i.lupus i.vasculitis i.type1dm i.type2dm i.thiazide i.betablocker i.raa i.acei i.a2a//
+i.cablocker i.tca i.ssri i.otherantidepress i.maoi i.ocp i.hrt i.anti_psycho c.Iage___2##i.mastectomy c.Iage___3##i.mastectomy//
+c.Iage___2##i.chemotherapy c.Iage___3##i.chemotherapy c.Iage___2##i.other_surgery c.Iage___3##i.other_surgery //
+c.Iage___2##i.fh_breastca c.Iage___3##i.fh_breastca c.Iage___2##i.ethriskid c.Iage___3##i.ethriskid i.mastectomy##i.ethriskid //
+i.other_surg##i.ethriskid, link(cloglog) vce(robust) irls                         
+timer off 1 
+timer list 
+timer clear 
+
+* Selected covariates - SHR<0.9 or >1.1, with p<0.05; interactions if p<0.05 * 
+* For categories, if 1 of the sub-groups is sig, retain variable * 
+global covariates = "Iage___2 Iage___3 Idiag* i.ethriskid i.smoke_cat ib6.cancer_route ib2.progesterone ib2.HER2 // 
+i.radio i.chemo i.mastect i.other_surg i.cancer_stage i.cancer_grade i.vasculitis i.hrt c.Iage___3##i.mastectomy //
+c.Iage___2##i.other_surgery c.Iage___3##i.other_surgery" 
+
+* Fit the final model * 
+mi estimate, dots eform: glm pseudo $covariates, link(cloglog) vce(robust) irls 
+
+* Save coefficients and constant term for later plotting/use * 
+cd "\models\Endpoint_3\"
+parmest, list(,) saving(CR_endpoint3_parmest.dta, replace) label eform for(estimate min95 max95)      // Save the model coefficients 
+
+
+********************************************************************************
+*                              2) Estimate IPCWs                               *
+********************************************************************************
+
+* Use Nelson-Aalen cumulative hazard - using same covariates as final model * 
+* Same covariate used as those selected for the prediction model * 
+mi stset time if period==2, failure(endpoint==0) exit(time 10)                                      // Code inspired by ado file for Stata command 'stbrier'
+sts gen basechazard = na 
+gen base_ipcw = . 
+summ basechazard if _t==10                                                                          // Nelseon-Aalen cumulative hazard for censoring at 10 years 
+replace base_ipcw = r(mean) if period==2 
+
+global covariates = "Iage___2 Iage___3 Idiag* i.ethriskid i.smoke_cat ib6.cancer_route ib2.progesterone //
+ib2.HER2 i.radio i.chemo i.mastect i.other_surg i.cancer_stage i.cancer_grade i.vasculitis i.hrt //
+c.Iage___3##i.mastectomy c.Iage___2##i.other_surgery c.Iage___3##i.other_surgery"
+
+mi estimate, dots saving(ipcw, replace): stcox $covariates if period==2, estimate efron                 // Fit model for censoring times, rather than death times
+mi predict xbC using ipcw if period==2, xb                                                              // Linear predictor (xb) from this censoring model 
+
+gen prob_cens = (exp(-base_ipcw)^exp(xbC))                                                              // Combine baseline 'hazard' with linear predictor for censoring  
+summ prob_cens, det 
+gen ipcw = 1/prob_cens                                                                                  // Inverse probability of censoring 
+summ ipcw, det 
+
+*Ensure data adequately re-stset - endpoint is breast cancer death * 
+mi stset time, failure(endpoint==1) exit(time 10)                                                       // Re-stset so that we go back to dealing with deaths
+
+
+save "\final_datasets\OX129_endpoint3_pseudovaluescif.dta", replace                                     // Save as new, standalone dataset 
+clear 
+
+********************************************************************************
+********************************************************************************
+
+
+
+********************************************************************************
+*                 3) Internal-external cross-validation run                    *
+********************************************************************************
+
+**********************
+* Preparing for IECV * 
+**********************
+
+* By using pseudovalues for the endpoint, and need to have separate time periods 
+* for IECV, we will use two 'sub-datasets' - one for period 1, another for 
+* period 2.  
+* Period 1 data will be used to fit model, linear predictor and probabilities will be 
+* calculated in iteratively held-out Period 2 samples * 
+
+use "/final_datasets\OX129_endpoint3_pseudovaluescif.dta", clear                                  // The Competing Risks modelling dataset made above 
+drop fu_start fu_end follow_up time                                                               // Keep clean so that we can be sure on dates/times 
+ 
+* Need to generate a measure of FU time from entry to earliest of: event/competing event/censoring/end of period 1/end of study * 
+* Outcomedate6 = date of breast cancer diagnosis * 
+gen fu_start = outcomedate6 
+format fu_start %td 
+gen fu_end = . 
+
+* Timesplit is the cut off between the two periods * 
+gen timesplit = mdy(01,01,2010)
+format timesplit %td
+tab period, m 
+
+* Follow-up must end at the timesplit if entered in period 1 *
+* Take the earliest of the timesplit, or other recorded exit date from cohort * 
+replace fu_end = min(exit3date, timesplit) if period==1 
+replace fu_end = exit3date if period==2 
+format fu_end %td 
+
+* Simple calc of follow-up in the IECV framework * 
+gen follow_up = fu_end-fu_start
+summ follow_up, det
+replace follow_up = follow_up/365.25                               // Scale is years 
+summ follow_up, det 
+
+* Overall event counts, any time in study period * 
+tab endpoint 
+
+* Generate new event indicator for IECV - event only within period * 
+gen iecv_event = 0 
+replace iecv_event = 1 if period==1 & endpoint==1 & exit3date<timesplit    // IECV endpoint = 1 if breast cancer death within Period  
+replace iecv_event = 1 if period==2 & endpoint==1 
+
+replace iecv_event = 2 if period==1 & endpoint==2 & exit3date<timesplit    // IECV endpoint = 2 if competing cause of death within Period 
+replace iecv_event = 2 if period==2 & endpoint==2 
+
+tab period 
+tab iecv_event 
+tab period iecv_event 
+
+* quick quality checks * 
+tab endpoint if period==1 
+tab iecv_event if period==1 
+tab iecv_event if period==2
+
+*set directory to call in ado files * 
+cd "\ado\plus\"
+
+* Estimate pseudovalues for CIF at 10 years in Period 1 data - this will be the 
+* 'target' for the models in IECV * 
+mi stset follow_up if period==1, failure(iecv_event==1) exit(time 10)          
+tab endpoint iecv_event if period==1  
+stpci if period==1, at(10) gen(period1_pseudo)                        // period1_pseudo = pseudovalues calculated in Period 1 data - endpoint for models in IECV
+summ period1_pseudo, det 
+
+mi stset follow_up if period==2, failure(iecv_event==1) exit(time 10)
+stpci if period==2, at(10) gen(period2_pseudo)
+summ period2_pseudo, det 
+
+save "\final_datasets\OX129_endpoint3_pseudovaluescif.dta", replace 
+
+* Convert to flong style so that all predictions are stored (they may vary by 
+* individual, as they may have varying imputed values). Want to use the MI data 
+* to calculate the performance metrics * 
+mi convert flong                                                     // Takes a minute and expands RAM usage
+
+************
+* Run IECV *
+************ 
+
+* Generate new variables in which to store held out predictions* 
+* Want to keep linear predictor (can be converted into event probability later) *
+* Then, we can use them for the pooled overall metrics, but also to calculate centre-specific estimates *  
+gen iecv_xb = .  
+
+global covariates = "Iage___2 Iage___3 Idiag* i.ethriskid i.smoke_cat ib6.cancer_route ib2.progesterone //
+ib2.HER2 i.radio i.chemo i.mastect i.other_surg i.cancer_stage i.cancer_grade i.vasculitis i.hrt //
+c.Iage___3##i.mastectomy c.Iage___2##i.other_surgery c.Iage___3##i.other_surgery"
+
+** Imputation numbers 7 and 29 cause issues with model not converging on them * 
+* This leads to missing predictions when using mi predict, which affects downstream code * 
+* Therefore, remove these 2 imputations (48/50) and use these throughout the 
+* evaluation steps * 
+mi set m -= (7 29)                                      // In Stata, an error on a model fitted to 1 imputation throws off the entire set of predictions...
+mi describe                                             // Therefore, better to keep 96% of data and make full use of IECV process 
+
+* Loop over each region, fit model, estimate metrics on held out region data. Later, we present individual practice results * 
+cd "\estimates\"
+
+forval x = 1(1)10 {                                      // 10 geographical regions
+	mi estimate, dots errorok notable saving(myestiecv, replace): glm period1_pseudo $covariates if (sha1!=`x' & period==1), link(cloglog) irls vce(robust)
+	mi predict double xb if (sha1==`x' & period==2) using myestiecv, xb storecompleted 
+	replace iecv_xb = xb if iecv_xb==. 
+	drop xb 
+	display `x'                                             // Keep track of how far through process you are 
+}
+
+summ iecv_xb, det 
+count if iecv_xb==. 
+tab period 
+
+* Generate predicted risks - as probabilities, by direct transformation (cloglog) of model linear predictor * 
+gen iecv_probabilities = 1 - exp(-exp(iecv_xb))
+summ iecv_probabilities, det 
+
+histogram iecv_prob, percent 
+graph save "Graph" "\graphs\ep3_competing\Histogram_EP3_competingrisks_predicted_risks_50imp.gph", replace 
+
+* Save updated dataset: save predictions, and then can use for the model evaluation* 
+save "\\final_datasets\OX129_endpoint3_competingrisk_IECV.dta" , replace
+
+
+****************************************************************
+** Calculate pooled metrics from predictions on held-out data **
+****************************************************************
+
+* Calibration plot - running smoother between predicted probs, and individual observed pseudo-probabilities, following stcoxcal approach of Royston * 
+* Use average prediction across all imputed datasets - mi convert wide * 
+mi convert wide 
+cd "\ado\plus\"
+running period2_pseudo iecv_probabilities, ci leg(off) nopts addplot(function y=x) ysc(range(0 1)) xsc(range(0 1))  //
+ylab(0(.2)1) xlab(0(.2)1) title("Smoothed calibration plot - Competing risks regression model", size(small))  //
+xtitle("Predicted event probability") ytitle("Observed event probability") graphregion(color(white)) aspect(1)
+
+graph save "Graph" "\graphs\ep3_competing\EP3_competing_smoothed_calibration.gph", replace
+
+* Predicted risks distribution - average prediction across all imputations * 
+histogram iecv_prob, percent 
+graph save "Graph" "\graphs\ep3_competing\Histogram_EP3_competingrisks_predicted_risks_average.gph", replace 
+
+* clear this without saving, then re-open the database so all imputation's predictions are  
+* used for other aspects of evaluation * 
+clear 
+
+use "\final_datasets\OX129_endpoint3_competingrisk_IECV.dta" , clear 
+
+* Calibration slope and calibration-in-the-large * 
+* Since predicted probabilities and pseudovalues are on same scale - linear regression * 
+mi estimate, dots: glm period2_pseudo iecv_probabilities, vce(robust)  
+
+* Harrell's C - inverse probability of censoring weighted *
+mi register regular ipcw                                                 // Tell Stata that each individual has this in every imputation 
+gen invprob = 1/iecv_probabilities                                       // somersd assumes that higher score = favourable survival. Need to invert this!
+mi stset follow_up if period==2, failure(endpoint==1) exit(time 10)
+gen censind = 1-_d if _st==1 & period==2                                 // need censoring indicator 
+mi estimate, cmdok dots: somersd _t invprob if (_st==1 & period==2) [iweight=ipcw], cenind(censind) tdist transf(c)    // Weight each contribution by IPCensoring 
+
+
+* Discrimination and calibration in different ethnic groups * 
+* Using esampvarok means that we can use imputed data - ethnicity may vary across 
+* imputation if was originally missing for that individual * 
+
+tab ethriskid _d if period==2 & _mi_m==0                              // Counts in complete case data as this is stationary 
+
+forval x = 1(1)9 {
+	mi estimate, cmdok dots esampvaryok: somersd _t invprob if (_st==1 & period==2 & ethriskid==`x') [iweight=ipcw], cenind(censind) tdist transf(c)
+  }
+
+* Calibration slope and calibration-in-the-large * 
+forval x = 1(1)9 { 
+	mi estimate, dots esampvaryok: glm period2_pseudo iecv_probabilities if ethriskid==`x', vce(robust) irls 
+}
+
+********************************************************************************
+********************************************************************************
+
+
+
+**************************************************
+**  4) Region-level heterogeneity and results   **
+**************************************************
+
+cd "\estimates\" 
+
+***************************
+* GT IECV for Harrell's C *                        // As for Cox models, run loop estimating performance for each region, save as own dataset, which used later 
+
+capture postutil clear   
+tempname C_EP3regioncompeting
+postfile `C_EP3regioncompeting' beta st_err val_size using C_EP3regioncompeting.dta , replace 
+  
+  forval x = 1(1)10 {
+  mi estimate, cmdok dots: somersd _t invprob if (_st==1 & sha1==`x' & period==2) [iweight=ipcw], cenind(censind) tdist transf(c) 
+  local beta = r(table)[1,1]
+  local st_err = r(table)[2,1]
+  local val_size = e(N)
+  post `C_EP3regioncompeting' (`beta') (`st_err') (`val_size')                      // beta = point estimate, st_err = standard error thereof 
+  }
+  
+  postclose `C_EP3regioncompeting' 
+  
+*********************************
+* GT IECV for calibration slope *
+
+capture postutil clear   
+tempname slope_EP3regioncompeting
+postfile `slope_EP3regioncompeting' slope slope_se val_size using slope_EP3regioncompeting.dta , replace          // linear regression between predicted and observed probs 
+  
+  forval x = 1(1)10 {
+  mi estimate, dots: glm period2_pseudo iecv_probabilities if (sha1==`x' & period==2), vce(robust) irls 
+  local slope = r(table)[1,1]             
+  local slope_se = r(table)[2,1]
+  local val_size = e(N)
+  post `slope_EP3regioncompeting' (`slope') (`slope_se') (`val_size')
+  }
+  
+  postclose `slope_EP3regioncompeting' 
+  
+****************************************
+* GT IECV for calibration-in-the-large *
+
+capture postutil clear   
+tempname citl_EP3regioncompeting
+postfile `citl_EP3regioncompeting' citl citl_se val_size using citl_EP3regioncompeting.dta , replace               // same model but take intercept term 
+  
+  forval x = 1(1)10 { 
+  mi estimate, dots: glm period2_pseudo iecv_probabilities if (sha1==`x' & period==2), vce(robust) irls 
+  local citl = r(table)[1,2]
+  local citl_se = r(table)[2,2]
+  local val_size = e(N)
+  post `citl_EP3regioncompeting' (`citl') (`citl_se') (`val_size')
+  }
+  
+  postclose `citl_EP3regioncompeting'
+ 
+ save "\final_datasets\OX129_endpoint3_competingrisk_IECV.dta" , replace 
+ 
+ * numbers of events per region in data - for forest plots below * 
+ tab sha1 _d if period==2 & _mi_m==0 
+ 
+clear 
+
+*****************
+* Meta-analyses *
+***************** 
+
+
+** Random effects meta-analysis pooled performance metrics * 
+use "\estimates\C_EP3regioncompeting.dta", clear 
+input str60 region                                                     // Make new variable containing Region name, event counts, and total count for reference 
+"East Midlands (464/3,337)"
+"East of England (543/4,826)"
+"London (1,270/13,287)"
+"North East (387/2,784)"
+"North West (1,664/15,419)"
+"South Central (1,062/11,272)"
+"South East (848/8,666)"
+"South West (1,054/10,165)"
+"West Midlands (1,032/8,678)"
+"Yorkshire & Humber (484/3,946)"
+end
+meta set beta st_err, studylab(region)
+meta summarize, random(sjonkman) se(khartung) predinterval(95)
+meta forestplot, random(sjonkman) se(khartung) predinterval(95) 
+graph save "Graph" "\graphs\EP3_harrellsC_competing.gph", replace 
+clear 
+
+use "\estimates\slope_EP3regioncompeting.dta" , clear 
+input str60 region
+"East Midlands (464/3,337)"
+"East of England (543/4,826)"
+"London (1,270/13,287)"
+"North East (387/2,784)"
+"North West (1,664/15,419)"
+"South Central (1,062/11,272)"
+"South East (848/8,666)"
+"South West (1,054/10,165)"
+"West Midlands (1,032/8,678)"
+"Yorkshire & Humber (484/3,946)"
+end
+meta set slope slope_se, studylab(region)
+meta summarize, random(sjonkman) se(khartung) predinterval(95)
+meta forestplot, random(sjonkman) se(khartung) predinterval(95) 
+graph save "Graph" "\graphs\EP3_slope_competing.gph", replace 
+clear
+
+use "\estimates\citl_EP3regioncompeting.dta" , clear 
+input str60 region
+"East Midlands (464/3,337)"
+"East of England (543/4,826)"
+"London (1,270/13,287)"
+"North East (387/2,784)"
+"North West (1,664/15,419)"
+"South Central (1,062/11,272)"
+"South East (848/8,666)"
+"South West (1,054/10,165)"
+"West Midlands (1,032/8,678)"
+"Yorkshire & Humber (484/3,946)"
+end
+meta set citl citl_se, studylab(region)
+meta summarize, random(sjonkman) se(khartung) predinterval(95)
+meta forestplot, random(sjonkman) se(khartung) predinterval(95) 
+graph save "Graph" "\graphs\EP3_citl_competing.gph", replace 
+clear
+
+
+log close 
+
+
+********************************************************************************
+********************************************************************************
+
+
+************************
+** 5) Meta-regression **
+************************
+
+* Form collapsed dataset which contains the region-level factors (period 2 data) to be explored in meta-reg *        // Same as for Cox models 
+use "\\final_datasets\OX129_endpoint3_imputed_IECV.dta" , clear                                                      // Repeated here for clarity 
+mi convert wide 
+keep if period==2 
+gen nonwhite = 0
+replace nonwhite=1 if (ethriskid!=. & ethriskid>1)
+gen age1 = age_at_diagnosis
+gen baseline_bmi1 = diagnosis_bmi
+gen town_int1 = town_int
+collapse (mean)age_at_diagnosis diagnosis_bmi town_int (sd)age1 baseline_bmi1 town_int1 (percent)nonwhite, by(sha1)
+tab age_at_diagnosis 
+tab diagnosis_bmi 
+tab town_int 
+tab age1
+tab baseline_bmi1 
+tab town_int1 
+tab nonwhite
+save "\\final_datasets\OX129_regionalperiod2_EP3.dta", replace 
+clear 
+ 
+**********************************************************************************
+* Examine effect of age, BMI, deprivation and non-white ethnicity on perf hetero *
+********************************************************************************** 
+
+*****************
+** Harrell's C **  
+use "\estimates\C_EP3regioncompeting.dta"
+gen sha1 = _n 
+merge 1:1 sha1 using "\final_datasets\OX129_regionalperiod2_EP3.dta"
+
+meta set beta st_err, studylab(sha1)
+
+meta regress age_at_diagnosis diagnosis_bmi town_int nonwhite, random(sjonkman) se(khartung)
+meta regress age1 baseline_bmi1 town_int nonwhite, random(sjonkman) se(khartung)
+
+meta regress age_at_diagnosis, random(sjonkman)
+estat bubbleplot 
+graph save "Graph" "\graphs\ep3_competing\bubbleplot_EP3_C_age_competing.gph", replace 
+
+meta regress age1, random(sjonkman)
+estat bubbleplot 
+graph save "Graph" "\graphs\ep3_competing\bubbleplot_EP3_C_ageSD_competing.gph", replace 
+
+meta regress town_int, random(sjonkman)
+estat bubbleplot 
+graph save "Graph" "\graphs\ep3_competing\bubbleplot_EP3_C_townsend_competing.gph", replace 
+
+meta regress nonwhite, random(sjonkman)
+estat bubbleplot 
+graph save "Graph" "\graphs\ep3_competing\bubbleplot_EP3_C_ethnic_competing.gph", replace 
+
+meta regress diagnosis_bmi, random(sjonkman)
+estat bubbleplot 
+graph save "Graph" "\graphs\ep3_competing\bubbleplot_EP3_C_bmi_competing.gph", replace 
+
+meta regress baseline_bmi, random(sjonkman)
+estat bubbleplot 
+graph save "Graph" "\graphs\ep3_competing\bubbleplot_EP3_C_bmiSD_competing.gph", replace 
+
+clear 
+
+
+***********************
+** Calibration slope ** 
+use "\estimates\slope_EP3regioncompeting.dta"
+gen sha1 = _n 
+merge 1:1 sha1 using "\final_datasets\OX129_regionalperiod2_EP3.dta"
+
+meta set slope slope_se, studylab(sha1)
+
+meta regress age_at_diagnosis diagnosis_bmi town_int nonwhite, random(sjonkman) se(khartung)
+meta regress age1 baseline_bmi1 town_int nonwhite, random(sjonkman) se(khartung)
+
+meta regress age_at_diagnosis, random(sjonkman)
+estat bubbleplot 
+graph save "Graph" "\graphs\ep3_competing\bubbleplot_EP3_slope_age_competing.gph", replace 
+
+meta regress age1, random(sjonkman)
+estat bubbleplot 
+graph save "Graph" "\graphs\ep3_competing\bubbleplot_EP3_slope_ageSD_competing.gph", replace 
+
+meta regress town_int, random(sjonkman)
+estat bubbleplot 
+graph save "Graph" "\graphs\ep3_competing\bubbleplot_EP3_slope_townsend_competing.gph", replace 
+
+meta regress nonwhite, random(sjonkman)
+estat bubbleplot 
+graph save "Graph" "\graphs\ep3_competing\bubbleplot_EP3_slope_ethnic_competing.gph", replace 
+
+meta regress diagnosis_bmi, random(sjonkman)
+estat bubbleplot 
+graph save "Graph" "\graphs\ep3_competing\bubbleplot_EP3_slope_bmi_competing.gph", replace 
+
+meta regress baseline_bmi, random(sjonkman)
+estat bubbleplot 
+graph save "Graph" "\graphs\ep3_competing\bubbleplot_EP3_slope_bmiSD_competing.gph", replace 
+
+clear 
+
+
+******************************
+** Calibration in the large ** 
+use "\estimates\citl_EP3regioncompeting.dta"
+gen sha1 = _n 
+merge 1:1 sha1 using "\final_datasets\OX129_regionalperiod2_EP3.dta"
+
+meta set citl citl_se, studylab(sha1)
+
+meta regress age_at_diagnosis diagnosis_bmi town_int nonwhite, random(sjonkman) se(khartung)
+meta regress age1 baseline_bmi1 town_int nonwhite, random(sjonkman) se(khartung)
+
+meta regress age_at_diagnosis, random(sjonkman)
+estat bubbleplot 
+graph save "Graph" "\graphs\ep3_competing\bubbleplot_EP3_citl_age_competing.gph", replace 
+
+meta regress age1, random(sjonkman)
+estat bubbleplot 
+graph save "Graph" "\graphs\ep3_competing\bubbleplot_EP3_citl_ageSD_competing.gph", replace 
+
+meta regress town_int, random(sjonkman)
+estat bubbleplot 
+graph save "Graph" "\graphs\ep3_competing\bubbleplot_EP3_citl_townsend_competing.gph", replace 
+
+meta regress nonwhite, random(sjonkman)
+estat bubbleplot 
+graph save "Graph" "\graphs\ep3_competing\bubbleplot_EP3_citl_ethnic_competing.gph", replace 
+
+meta regress diagnosis_bmi, random(sjonkman)
+estat bubbleplot 
+graph save "Graph" "\graphs\ep3_competing\bubbleplot_EP3_citl_bmi_competing.gph", replace 
+
+meta regress baseline_bmi, random(sjonkman)
+estat bubbleplot 
+graph save "Graph" "\graphs\ep3_competing\bubbleplot_EP3_citl_bmiSD_competing.gph", replace 
+
+clear 
+
+********************************************************************************
+********************************************************************************
+
+## END ## 

@@ -1,7 +1,7 @@
-- 👋 Hi, I’m Ash @AshDF91
+- 👋 Hi, I’m Ash Darnell-Fish @AshDF91
 - 👀 Clinical Research Fellow (DPhil) at Uni of Oxford
 - 🌱 Interested in clinical prediction modelling using statistical learning and machine learning
-- 🐱‍🏍 Competing risks, pseudovalues, calibration, Bayesian optimisation   
+- 🐱‍🏍 Competing risks models, pseudovalues, model calibration, Bayesian optimisation, adapting ML models for time-to-event/competing risks data   
 
 <!---
 AshDF91/AshDF91 is a ✨ special ✨ repository because its `README.md` (this file) appears on your GitHub profile.

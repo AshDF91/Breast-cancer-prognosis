@@ -1,1 +1,525 @@
+## Evaluating machine learning models ##
+
+## After fitting the models, then using IECV to generate individual-level predictions, the predictions 
+## (which were stored in csv files) are imported to Stata so that the same metrics can be calculated ##
+
+
+* OPEN STATA *
+
+*************************
+* NEURAL NETWORK MODELS *
+*************************
+
+********************************************************************************
+** Performance of neural network based on 'pooled predictions' and IECV  ** 
+***************************************************************************
+
+* Open saved csv file in Stata from R * 
+import delimited "\estimates\ML_IECV_predictions\endpoint3_nnet_iecv_predictions.csv", asdouble 
+
+drop v1                                                                                            // v1 is just an observation number - not useful 
+
+* Destring the predictions, and rename variables for congeniality with Stata files* 
+destring nnet_iecv_predictions, dpcomma replace
+summ nnet_iecv_predictions, det
+rename nnet_iecv_predictions predictions                                                           // Renaming for consistency across both models
+rename data_period2patid patid
+bys patid: gen m = _n                                                                              // Sort by patient ID, generate imputation number (each patient will be present 50 times due to m=50 imputations) 
+                                                                                                   // This variable 'm' will be used to denote imputation number 
+* Clip the predictions to be between 0 and 1 - they are probabilities * 
+count if predictions<0
+count if predictions>1
+replace predictions = 0 if predictions<0 
+replace predictions = 1 if predictions>1 
+
+* Save this as interim dataset * 
+save "\ML_IECV_predictions\endpoint3_nnet_iecv_predictions_formatted.dta", replace
+
+* We want to perform model evaluation in accordance with Rubin's rules with 
+* multiple imputed datasets. For this, Stata 'needs' an m=0 (i.e. complete case)
+* copy, and then the separate imputations below it. We need to trick Stata into handling this * 
+
+* First, keep first imputation, and say it is the complete case, m=0 
+keep if m==1 
+replace m=0 
+
+* Generate mi style missing indicator - (variable '1') to say that predictions are missing, then 
+* later we can use Stata's mi machinery to handle the 50 predictions for each 
+* patid as separate imputations' predictions 
+gen i_predictions = 1 
+tab m 
+replace predictions = . if i_predictions==1 
+
+* Now that the predictions in m=0 are missing, append the dataset with the 50 
+* true values of the predictions, 1 for each patid in each imputation 
+append using  "\estimates\ML_IECV_predictions\endpoint3_nnet_iecv_predictions_formatted.dta"
+
+* Save interim data file 
+save  "\estimates\ML_IECV_predictions\endpoint3_nnet_iecv_predictions_formatted.dta", replace 
+
+* Format as multiply imputed dataset - now, m=0 will have no predictions, whereas 
+* the m=1 to m=50 will have their respective predictions in 
+mi import flong, m(m) id(patid) imputed(predictions)                                                 // Importing imputations into this dataset 
+
+* Convert to wide style for the convenience of dataset size, and for merging later 
+mi convert wide 
+mi describe 
+
+* Save interim datafile after mi conversion * 
+save  "\estimates\ML_IECV_predictions\endpoint3_nnet_iecv_predictions_formatted.dta", replace
+
+* For the smoothed calibration plot, we want each individual's average prediction, so that 
+* this can be plotted against the observed pseudovalues * 
+egen mean_prediction = rowmean(_1_predict - _50_predict) 
+summ mean_prediction, det 
+
+* Save and clear * 
+save  "\estimates\ML_IECV_predictions\endpoint3_nnet_iecv_predictions_formatted.dta", replace
+clear 
+
+* Open up the key dataset - this contains psuedovalues, period1, period2, etc. *
+* This is in 'wide' format * 
+use "\final_datasets\OX129_endpoint3_pseudovaluescif.dta", clear 
+keep if period==2 
+
+* Merge in the formatted predictions from the IECV process for the neural net * 
+mi merge 1:1 patid using "\estimates\ML_IECV_predictions\endpoint3_nnet_iecv_predictions_formatted.dta"
+
+mi describe 
+
+************************
+** Pooled predictions **
+************************
+
+* Plot the smoothed calibration plot - save out * 
+* Running smoother between predicted probabilities and observed pseudo-prabilities - both on same scale * 
+running period2_pseudo mean_prediction if _mi_m==1, ci leg(off) nopts xscale(range(0 1)) yscale(range(0 1)) aspect(1) //
+title("Smoothed calibration plot - neural network", size(small)) xtitle("Predicted event probability", size(small)) // 
+ytitle("Observed event probability", size(small)) addplot(function y=x) graphregion(color(white)) ylabel(0(.2)1) xlabel(0(.2)1)
+
+graph save "\graphs\ep3_competing\calibration_neuralnet_iecv.gph", replace
+
+* Calibration of neural network - pooled predictions * 
+* Again, predicted and observed predictions are on same scale, so use linear model - robust standard errors to account for non-independence of observations * 
+mi estimate, dots: glm period2_pseudo predictions, link(id) vce(robust) irls 
+ 
+* Discrimination - pooled predictions * 
+mi register regular ipcw                                                                              // ipc weights - one for each patient
+mi stset fu_end, origin(fu_start) failure(iecv_event==1) scale(365.25) exit(time fu_start+3652.5)     // Use follow-up and event indicators previously made in regression steps 
+drop hr 
+mi passive: gen hr = exp(prediction)                                                                  // Exponentiate to avoid any predictions equalling zero - this preserves the ordering!
+mi passive: gen invhr = 1/hr                                                                          // somersd expects higher score = better survival, so invert 
+gen censind = 1 - _d if _st==1
+mi estimate, dots cmdok: somersd _t invhr if (_st==1) [iweight=ipcw], cenind(censind) tdist transf(c) // Run it 
+
+
+****************************************************************
+** Pooled predictions: heterogeneity by ethnicity and age grp **
+****************************************************************
+
+* Discrimination and calibration in different ethnic groups * 
+forval x = 1(1)9 {
+	mi estimate, dots esampvaryok: somersd _t invhr if (_st==1 & ethriskid==`x') [iweight=ipcw], cenind(censind) tdist transf(c)    // Again, ethnic group may vary across imputations, so permit this to be captured when making full use of imputed data 
+  } 
+
+* Calibration slope and calibration-in-the-large * 
+forval x = 1(1)9 {
+	mi estimate, dots esampvaryok: glm period2_pseudo predictions if ethriskid==`x', irls vce(robust)      // Again, predicted and observed probabilities on same scale - generalised linear model 
+}
+
+************************************************
+** IECV predictions and performance estimates **
+************************************************
+
+**************************************************
+**     Region-level heterogeneity and results   **
+**************************************************
+cd "\\estimates\" 
+
+***************************
+* GT IECV for Harrell's C *                                        // Loop to estimate model's Harrell's C for each region, save into separate dataset, then use later to pool with meta-analysis
+
+capture postutil clear   
+tempname C_EP3regionnnet
+postfile `C_EP3regionnnet' beta st_err val_size using C_EP3regionnnet.dta , replace 
+  
+  forval x = 1(1)10 {
+  mi estimate, dots: somersd _t invhr if (_st==1 & sha1==`x') [iweight=ipcw], cenind(censind) tdist transf(c)
+  local beta = r(table)[1,1]
+  local st_err = r(table)[2,1]
+  local val_size = e(N)
+  post `C_EP3regionnnet' (`beta') (`st_err') (`val_size')
+  }
+  
+  postclose `C_EP3regionnnet' 
+  
+*********************************
+* GT IECV for calibration slope *                                   // Similar as regression modelling - slope is gradient term from generalised linear model 
+
+capture postutil clear   
+tempname slope_EP3regionnnet
+postfile `slope_EP3regionnnet' slope slope_se val_size using slope_EP3regionnnet.dta , replace 
+  
+  forval x = 1(1)10 {
+  mi estimate, dots: glm period2_pseudo prediction if sha1==`x', irls vce(robust) 
+  local slope = r(table)[1,1]
+  local slope_se = r(table)[2,1]
+  local val_size = e(N)
+  post `slope_EP3regionnnet' (`slope') (`slope_se') (`val_size')
+  }
+  
+  postclose `slope_EP3regionnnet'  
+  
+****************************************
+* GT IECV for calibration-in-the-large *                           // CITL is the intercept term
+
+capture postutil clear   
+tempname citl_EP3regionnnet
+postfile `citl_EP3regionnnet' citl citl_se val_size using citl_EP3regionnnet.dta , replace 
+  
+  forval x = 1(1)10 { 
+  mi estimate, dots: glm period2_pseudo prediction if sha1==`x', irls vce(robust)  
+  local citl = r(table)[1,2]
+  local citl_se = r(table)[2,2]
+  local val_size = e(N)
+  post `citl_EP3regionnnet' (`citl') (`citl_se') (`val_size')
+  }
+  
+  postclose `citl_EP3regionnnet'
+ 
+ ** Decision curve analysis for neural network model ** 
+summ mean_prediction, det  
+
+cd "\\qrvfile1\OX129\ado\plus\"
+stdca mean_prediction, prob(yes) smooth timepoint(10) title("Decision curve analysis - neural network", size(small))
+graph save "Graph" "\graphs\EP3_DCA_neuralnetwork.gph", replace 
+ 
+* Event/denominator counts for meta-analysis plots below * 
+tab sha1 _d if period==2                                        // Number of events in each region during Period 2, and total in each region 
+ 
+clear 
+
+*****************
+* Meta-analyses *
+***************** 
+
+** Random effects meta-analysis pooled performance metrics * 
+use "\estimates\C_EP3regionnnet.dta", clear 
+input str50 region
+"East Midlands (464/3,337)"
+"East of England (543/4,826)"
+"London (1,270/13,287)"
+"North East (387/2,784)"
+"North West (1,664/15,419)"
+"South Central (1,062/11,272)"
+"South East (848/8,666)"
+"South West (1,054/10,165)"
+"West Midlands (1,032/8,678)"
+"Yorkshire & Humber (484/3,946)"
+end
+meta set beta st_err, studylab(region)
+meta summarize, random(sjonkman) se(khartung) predinterval(95)
+meta forestplot, random(sjonkman) se(khartung) predinterval(95) 
+graph save "Graph" "\graphs\EP3_harrellsC_nnet.gph", replace 
+clear 
+
+use "\estimates\slope_EP3regionnnet.dta" , clear 
+input str50 region
+"East Midlands (464/3,337)"
+"East of England (543/4,826)"
+"London (1,270/13,287)"
+"North East (387/2,784)"
+"North West (1,664/15,419)"
+"South Central (1,062/11,272)"
+"South East (848/8,666)"
+"South West (1,054/10,165)"
+"West Midlands (1,032/8,678)"
+"Yorkshire & Humber (484/3,946)"
+end
+meta set slope slope_se, studylab(region)
+meta summarize, random(sjonkman) se(khartung) predinterval(95)
+meta forestplot, random(sjonkman) se(khartung) predinterval(95) 
+graph save "Graph" "\graphs\EP3_slope_nnet.gph", replace 
+clear
+
+use "\estimates\citl_EP3regionnnet.dta" , clear 
+input str50 region
+"East Midlands (464/3,337)"
+"East of England (543/4,826)"
+"London (1,270/13,287)"
+"North East (387/2,784)"
+"North West (1,664/15,419)"
+"South Central (1,062/11,272)"
+"South East (848/8,666)"
+"South West (1,054/10,165)"
+"West Midlands (1,032/8,678)"
+"Yorkshire & Humber (484/3,946)"
+end
+meta set citl citl_se, studylab(region)
+meta summarize, random(sjonkman) se(khartung) predinterval(95)
+meta forestplot, random(sjonkman) se(khartung) predinterval(95) 
+graph save "Graph" "\graphs\EP3_citl_nnet.gph", replace 
+clear
+
+********************************************************************************
+********************************************************************************
+
+* END FOR NEURAL NETWORK EVALUATION * 
+
+
+********************************************************************************
+********************************************************************************
+
+******************
+* XGBoost Models *
+******************
+
+*********************************************************************
+** Performance of XGBoost based on 'pooled predictions' and IECV  ** 
+*********************************************************************
+* The below, initial processing steps are the same from above for the XGBoost model * 
+
+* Open saved csv file from R * 
+import delimited "\estimates\ML_IECV_predictions\endpoint3_xgboost_iecv_predictions.csv", asdouble 
+drop v1 
+
+* Destring the predictions, and rename variables for congeniality with Stata files* 
+destring xgboost_iecv_predictions, dpcomma replace
+summ xgboost_iecv_predictions, det
+rename xgboost_iecv_predictions predictions 
+rename data_period2patid patid
+bys patid: gen m = _n 
+
+* Clip the predictions to be between 0 and 1 - they are probabilities * 
+count if predictions<0
+count if predictions>1
+replace predictions = 0 if predictions<0 
+replace predictions = 1 if predictions>1 
+summ predictions, det 
+
+* Save this as interim dataset * 
+save "\estimates\ML_IECV_predictions\endpoint3_xgboost_iecv_predictions_formatted.dta", replace
+
+* We want to perform model evaluation in accordance with Rubin's rules with 
+* multiple imputed datasets. For this, Stata 'needs' an m=0 (i.e. complete case)
+* copy, and then the separate imputations. We need to trick Stata into this
+* First, keep first imputation, and say it is the complete case, m=0 
+keep if m==1 
+replace m=0 
+
+* Generate mi style missing indicator - say that predictions are missing, then 
+* later we can use Stata's mi machinery to handle the 50 predictions for each 
+* patid as a separate imputations' predition 
+gen i_predictions = 1 
+tab m 
+replace predictions = . if i_predictions==1 
+
+* Now that the predictions in m=0 are missing, append the dataset with the 50 
+* true values of the predictions, 1 for each pati in each imputation 
+append using  "\estimates\ML_IECV_predictions\endpoint3_xgboost_iecv_predictions_formatted.dta"
+
+* Save interim data file 
+save  "\estimates\ML_IECV_predictions\endpoint3_xgboost_iecv_predictions_formatted.dta", replace 
+
+* Format as multiply imputed dataset - now, m=0 will have no predictions, whereas 
+* the m=1 to m=50 will have their respective predictions in 
+mi import flong, m(m) id(patid) imputed(predictions)
+
+* Convert to wide style for the convenience of dataset size, and for merging later 
+mi convert wide 
+mi describe 
+
+* Save interim datafile after mi conversion * 
+save  "\estimates\ML_IECV_predictions\endpoint3_xgboost_iecv_predictions_formatted.dta", replace
+
+* For the smoothed calibration plot, we want the average prediction, so that 
+* this can be plotted against the observed pseudovalues * 
+egen mean_prediction = rowmean(_1_predict - _50_predict) 
+
+* Save and clear * 
+save  "\estimates\ML_IECV_predictions\endpoint3_xgboost_iecv_predictions_formatted.dta", replace
+clear 
+
+* Open up the key dataset - this contains psuedovalues, period1, period2, etc. *
+use "\final_datasets\OX129_endpoint3_pseudovaluescif.dta", clear 
+keep if period==2 
+
+* Merge in the formatted predictions from the IECV process for the neural net * 
+mi merge 1:1 patid using "\estimates\ML_IECV_predictions\endpoint3_xgboost_iecv_predictions_formatted.dta"
+
+
+************************
+** Pooled predictions **
+************************
+
+* Plot the smoothed calibration plot - save out *  
+running period2_pseudo mean_prediction if _mi_m==1, ci leg(off) nopts xscale(range(0 1)) yscale(range(0 1)) aspect(1) //
+title("Smoothed calibration plot - XGBoost", size(small)) xtitle("Predicted event probability", size(small)) // 
+ytitle("Observed event probability", size(small)) addplot(function y=x) graphregion(color(white)) ylabel(0(.2)1) xlabel(0(.2)1)
+graph save "\graphs\ep3_competing\calibration_xgboost_iecv.gph", replace
+
+* Calibration of neural network - pooled predictions * 
+mi estimate, dots: glm period2_pseudo prediction, link(id) vce(robust) irls
+ 
+* Discrimination - pooled predictions * 
+mi register regular ipcw 
+mi stset fu_end, origin(fu_start) failure(iecv_event==1) scale(365.25) exit(time fu_start+3652.5)
+mi passive: gen hr = exp(prediction)
+mi passive: gen invhr = 1/hr 
+gen censind = 1 - _d if _st==1
+mi estimate, dots cmdok: somersd _t invhr if (_st==1) [iweight=ipcw], cenind(censind) tdist transf(c)
+
+
+****************************************************************
+** Pooled predictions: heterogeneity by ethnicity and age grp **
+****************************************************************
+
+* Discrimination in different ethnic groups * 
+forval x = 1(1)9 {
+	mi estimate, dots esampvaryok: somersd _t invhr if (_st==1 & ethriskid==`x') [iweight=ipcw], cenind(censind) tdist transf(c)
+  } 
+
+* Calibration slope and calibration-in-the-large * 
+forval x = 1(1)9 { 
+	mi estimate, dots esampvaryok: glm period2_pseudo prediction if ethriskid==`x', irls vce(robust) 
+}
+
+************************************************
+** IECV predictions and performance estimates **
+************************************************
+
+** Numbers of events and denominators for the forest plots ** 
+* Estimated using neural network evaluation steps above * 
+
+**************************************************
+**     Region-level heterogeneity and results   **
+**************************************************
+cd "\estimates\" 
+
+***************************
+* GT IECV for Harrell's C *
+
+capture postutil clear   
+tempname C_EP3regionxgboost
+postfile `C_EP3regionxgboost' beta st_err val_size using C_EP3regionxgboost.dta , replace 
+  
+  forval x = 1(1)10 {
+  mi estimate, dots: somersd _t invhr if (_st==1 & sha1==`x') [iweight=ipcw], cenind(censind) tdist transf(c)
+  local beta = r(table)[1,1]
+  local st_err = r(table)[2,1]
+  local val_size = e(N)
+  post `C_EP3regionxgboost' (`beta') (`st_err') (`val_size')
+  }
+  
+  postclose `C_EP3regionxgboost' 
+  
+*********************************
+* GT IECV for calibration slope *
+
+capture postutil clear   
+tempname slope_EP3regionxgboost
+postfile `slope_EP3regionxgboost' slope slope_se val_size using slope_EP3regionxgboost.dta , replace 
+  
+  forval x = 1(1)10 {
+  mi estimate, dots: glm period2_pseudo prediction if sha1==`x', irls vce(robust) 
+  local slope = r(table)[1,1]
+  local slope_se = r(table)[2,1]
+  local val_size = e(N)
+  post `slope_EP3regionxgboost' (`slope') (`slope_se') (`val_size')
+  }
+  
+  postclose `slope_EP3regionxgboost'  
+  
+****************************************
+* GT IECV for calibration-in-the-large *
+
+capture postutil clear   
+tempname citl_EP3regionxgboost
+postfile `citl_EP3regionxgboost' citl citl_se val_size using citl_EP3regionxgboost.dta , replace 
+  
+  forval x = 1(1)10 { 
+  mi estimate, dots: glm period2_pseudo prediction if sha1==`x', irls vce(robust)  
+  local citl = r(table)[1,2]
+  local citl_se = r(table)[2,2]
+  local val_size = e(N)
+  post `citl_EP3regionxgboost' (`citl') (`citl_se') (`val_size')
+  }
+  
+  postclose `citl_EP3regionxgboost'
+ 
+
+** Decision curve analysis for XGBoost ** 
+summ mean_prediction, det  
+
+cd "\ado\plus\"
+stdca mean_prediction, prob(yes) smooth timepoint(10) title("Decision curve analysis - XGBoost", size(small))
+graph save "Graph" "\graphs\EP3_DCA_XGBoost.gph", replace 
+ 
+clear 
+
+*****************
+* Meta-analyses *
+***************** 
+
+** Random effects meta-analysis pooled performance metrics * 
+use "\estimates\C_EP3regionxgboost.dta", clear 
+input str50 region
+"East Midlands (464/3,337)"
+"East of England (543/4,826)"
+"London (1,270/13,287)"
+"North East (387/2,784)"
+"North West (1,664/15,419)"
+"South Central (1,062/11,272)"
+"South East (848/8,666)"
+"South West (1,054/10,165)"
+"West Midlands (1,032/8,678)"
+"Yorkshire & Humber (484/3,946)"
+end
+meta set beta st_err, studylab(region) eslabel("Harrell's C")
+meta summarize, random(sjonkman) se(khartung) predinterval(95)
+meta forestplot, random(sjonkman) se(khartung) predinterval(95) 
+graph save "Graph" "\graphs\EP3_harrellsC_xgboost.gph", replace 
+clear 
+
+use "\estimates\slope_EP3regionxgboost.dta" , clear 
+input str50 region
+"East Midlands (464/3,337)"
+"East of England (543/4,826)"
+"London (1,270/13,287)"
+"North East (387/2,784)"
+"North West (1,664/15,419)"
+"South Central (1,062/11,272)"
+"South East (848/8,666)"
+"South West (1,054/10,165)"
+"West Midlands (1,032/8,678)"
+"Yorkshire & Humber (484/3,946)"
+end
+meta set slope slope_se, studylab(region) eslabel("Calibration slope")
+meta summarize, random(sjonkman) se(khartung) predinterval(95)
+meta forestplot, random(sjonkman) se(khartung) predinterval(95) 
+graph save "Graph" "\graphs\EP3_slope_xgboost.gph", replace 
+clear
+
+use "\estimates\citl_EP3regionxgboost.dta" , clear 
+input str50 Region
+"East Midlands (464/3,337)"
+"East of England (543/4,826)"
+"London (1,270/13,287)"
+"North East (387/2,784)"
+"North West (1,664/15,419)"
+"South Central (1,062/11,272)"
+"South East (848/8,666)"
+"South West (1,054/10,165)"
+"West Midlands (1,032/8,678)"
+"Yorkshire & Humber (484/3,946)"
+end
+meta set citl citl_se, studylabel("Region") eslabel("Calibration-in-the-large") 
+meta summarize, random(sjonkman) se(khartung) predinterval(95)
+meta forestplot, random(sjonkman) se(khartung) predinterval(95)
+graph save "Graph" "\\graphs\EP3_citl_xgboost.gph", replace 
+clear
+
+********************************************************************************
+********************************************************************************
+
 

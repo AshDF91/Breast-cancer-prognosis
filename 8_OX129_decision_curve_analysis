@@ -1,1 +1,73 @@
+## USING DECISION CURVE ANALYSIS TO COMPARE CLINICAL UTILITY OF MODELS ##
+
+## We use the saved individual-level predictions generated with IECV to evaluate this ##
+## Overall, we load in the average prediction (average over 50 imputations, as per Rubin's rule for point estimates), 
+## merge with the survival/time-to-event data in the full dataset, then run the dca package ##
+
+***********************************************************************************************
+
+** Step 1: Obtain mean predictions for each individual from each model, save as mini file with patid and mean_prediction ** 
+
+** Cox model 
+use "\final_datasets\OX129_endpoint3_imputed_IECV.dta", clear 
+mi convert wide 
+keep if period==2 
+gen mean_prediction_cox = 1 - period1_baseline_surv_cox^exp(iecv_xb)
+rename mean_prediction_cox cox                                                                   * Rename prediction for each model simply, so can keep track/evaluate 
+keep patid cox 
+summ cox, det 
+save "\estimates\ML_IECV_predictions\DCA_endpoint3_cox_iecv_predictions_formatted.dta", replace
+clear 
+
+** Competing risks regression 
+use "\final_datasets\OX129_endpoint3_competingrisk_IECV.dta", clear 
+mi convert wide 
+keep if period==2
+rename iecv_probabilities crr                                                                   * Rename predictions crr = competing risks regression, you get the idea
+keep patid crr  
+summ crr, det 
+save "\estimates\ML_IECV_predictions\DCA_endpoint3_crr_iecv_predictions_formatted.dta", replace
+clear 
+
+** XGBoost 
+use "\estimates\ML_IECV_predictions\endpoint3_xgboost_iecv_predictions_formatted.dta", clear 
+keep patid mean_prediction
+rename mean_prediction xgb
+summ xgb, det 
+save "\estimates\ML_IECV_predictions\DCA_endpoint3_xgboost_iecv_predictions_formatted.dta", replace
+clear 
+
+
+** Neural network 
+use "\estimates\ML_IECV_predictions\endpoint3_nnet_iecv_predictions_formatted.dta", clear 
+keep patid mean_prediction
+rename mean_prediction nnet 
+summ nnet, det 
+save "\estimates\ML_IECV_predictions\DCA_endpoint3_nnet_iecv_predictions_formatted.dta", replace
+clear 
+
+
+** Import, merge and analyse ** 
+use "\final_datasets\OX129_endpoint3_pseudovaluescif.dta", clear                              * This is the key dataset generated during regression modelling steps 
+mi convert wide                                                                               * Don't need stacked imputations - quicker to run and makes sense in wide format 
+keep if period==2                                                                             * Only have predictions generated in Period 2 data after IECV
+drop _merge 
+
+foreach x in cox crr xgboost nnet {                                                           * Merge in the predictions from each model with their simple/handy variable names 
+
+merge 1:1 patid using "\estimates\ML_IECV_predictions\DCA_endpoint3_`x'_iecv_predictions_formatted.dta"
+drop _merge 
+}
+
+ mi stset follow_up, failure(iecv_event==1) exit(time 10)                                       * Stset the data so that DCA can run 
+ 
+ cd "\ado\plus\"                                                                                * Path for calling in non-routine packages
+ 
+ stdca cox crr xgb nnet, timepoint(10) prob(yes yes yes yes) smooth lpattern(solid solid dash dash dash dash)
+ graph save "Graph" "\graphs\EP3_decisioncurve_all_models.gph", replace 
+ clear 
+ 
+ *******************************************************************************
+ *******************************************************************************
+ ** END **
 

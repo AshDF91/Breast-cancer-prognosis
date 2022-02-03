@@ -523,3 +523,117 @@ clear
 ********************************************************************************
 
 
+
+*********************************
+* META-REGRESSION FOR ML MODELS *
+*********************************
+
+* Use the pre-made datasets for region-level performance metrics, and the region-level summary demographic characteristics data file * 
+
+* XGboost * 
+
+***************
+* Harrell's C * 
+use "\estimates\C_EP3regionxgboost.dta"
+gen sha1 = _n 
+merge 1:1 sha1 using "\final_datasets\OX129_regionalperiod2_EP3.dta"
+
+meta set beta st_err, studylab(sha1) 
+
+meta regress age_at_diagnosis diagnosis_bmi town_int nonwhite, random(sjonkman) se(khartung)
+meta regress age1 baseline_bmi1 town_int nonwhite, random(sjonkman) se(khartung) 
+
+meta regress age1, random(sjonkman) 
+estat bubbleplot 
+
+meta regess town_int, random(sjonkman) 
+estat bubbleplot 
+
+meta regress non_white, random(sjonkman) 
+estat bubbleplot 
+
+meta regress baseline_bmi1, random(sjonkman) 
+estat bubbleplot 
+clear 
+
+*********************
+* Calibration slope *
+use "\estimates\slope_EP3regionxgboost.dta"
+gen sha1 = _n 
+merge 1:1 sha1 using "\final_datasets\OX129_regionalperiod2_EP3.dta"
+
+meta set slope slope_se, studylab(sha1) 
+
+meta regress age_at_diagnosis diagnosis_bmi town_int nonwhite, random(sjonkman) se(khartung)
+meta regress age1 baseline_bmi1 town_int nonwhite, random(sjonkman) se(khartung) 
+
+meta regress age1, random(sjonkman) 
+estat bubbleplot 
+
+meta regess town_int, random(sjonkman) 
+estat bubbleplot 
+
+meta regress non_white, random(sjonkman) 
+estat bubbleplot 
+
+meta regress baseline_bmi1, random(sjonkman) 
+estat bubbleplot 
+clear 
+
+
+
+* Neural networks * 
+
+***************
+* Harrell's C * 
+use "\estimates\C_EP3regionnnet.dta"
+gen sha1 = _n 
+merge 1:1 sha1 using "\final_datasets\OX129_regionalperiod2_EP3.dta"
+
+meta set beta st_err, studylab(sha1) 
+
+meta regress age_at_diagnosis diagnosis_bmi town_int nonwhite, random(sjonkman) se(khartung)
+meta regress age1 baseline_bmi1 town_int nonwhite, random(sjonkman) se(khartung) 
+
+meta regress age1, random(sjonkman) 
+estat bubbleplot 
+
+meta regess town_int, random(sjonkman) 
+estat bubbleplot 
+
+meta regress non_white, random(sjonkman) 
+estat bubbleplot 
+
+meta regress baseline_bmi1, random(sjonkman) 
+estat bubbleplot 
+clear 
+
+*********************
+* Calibration slope *
+use "\estimates\slope_EP3regionnnet.dta"
+gen sha1 = _n 
+merge 1:1 sha1 using "\final_datasets\OX129_regionalperiod2_EP3.dta"
+
+meta set slope slope_se, studylab(sha1) 
+
+meta regress age_at_diagnosis diagnosis_bmi town_int nonwhite, random(sjonkman) se(khartung)
+meta regress age1 baseline_bmi1 town_int nonwhite, random(sjonkman) se(khartung) 
+
+meta regress age1, random(sjonkman) 
+estat bubbleplot 
+
+meta regess town_int, random(sjonkman) 
+estat bubbleplot 
+
+meta regress non_white, random(sjonkman) 
+estat bubbleplot 
+
+meta regress baseline_bmi1, random(sjonkman) 
+estat bubbleplot 
+clear 
+
+********************************************************************************
+********************************************************************************
+
+** END ** 
+

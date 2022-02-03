@@ -342,3 +342,417 @@ save_model_hdf5(final_model, "ep3_neuralnetwork_final.h5")
 
 ###############################################################################################
 ###############################################################################################
+
+## Clear out the environment to start fresh for evaluation ##
+rm = ls() 
+
+
+## MODEL EVALUATION STRATEGY ## 
+
+#############################
+## Load in packages needed ##
+#############################
+library(survival)
+library(readr)
+library(stringr)
+library(caret)
+library(haven)
+library(ParBayesianOptimization) 
+library(keras)
+library(tensorflow)
+
+########################################################
+## Check and set working directory for importing data ##
+########################################################
+## Here, we need to separately import and format the Period 1 and Period 2 data ##
+getwd() 
+setwd("/final_datasets/ML/")
+
+## Importing Period 1 sub-cohort (model fitting) separately from Period 2 sub-cohort (model evaluation) ##
+data_period1 <- read_dta("OX129_endpoint3_stacked50_period1_pseudovalues.dta")
+str(data_period1)
+
+## Need to reformat categorical variables ##
+## Categorical variables need to be converted into dummy variables ##
+## First, reformat relevant parameters as factors, then convert to dummies #
+
+data_period1$ethriskid           <- factor(data_period1$ethriskid)                    # Ethnicity 
+data_period1$smoke_cat           <- factor(data_period1$smoke_cat)                    # Smoking status 
+data_period1$cancer_route        <- factor(data_period1$cancer_route)                 # Route to diagnosis
+data_period1$progesterone_status <- factor(data_period1$progesterone_status)          # PR +/-
+data_period1$HER2_status         <- factor(data_period1$HER2_status)                  # HER2 +/-/borderline 
+data_period1$radiotherapy        <- factor(data_period1$radiotherapy)                 # Use of RTx in 1st year 
+data_period1$mastectomy          <- factor(data_period1$mastectomy)                   # Mastectomy in 1st year  
+data_period1$chemotherapy        <- factor(data_period1$chemotherapy)                 # Chemo in 1st year 
+data_period1$other_surgery       <- factor(data_period1$other_surgery)                # Other surgery in 1st year 
+data_period1$cancer_stage        <- factor(data_period1$cancer_stage)                 # Stage (I-IV)
+data_period1$cancer_grade        <- factor(data_period1$cancer_grade)                 # Grade (differentiation)
+data_period1$hrt                 <- factor(data_period1$hrt)                          # Hormone replacement therapy use
+data_period1$vasculitis          <- factor(data_period1$vasculitis)                   # Vasculitis 
+data_period1$sha1                <- factor(data_period1$sha1)                         # Region - used for IECV
+
+## Now, start converting these factors to dummies ##
+## Set up list of parameters that need dummies ##
+dummy_parameters <- c('ethriskid', 'smoke_cat', 'radiotherapy', 
+                      'progesterone_status', 'HER2_status', 'radiotherapy', 
+                      'mastectomy', 'chemotherapy', 'other_surgery', 'cancer_stage', 
+                      'cancer_grade', 'hrt', 'vasculitis', 'cancer_route' )
+
+## The others will be hamdled as binary ##
+## Generate the dummies ##
+dummies <- dummyVars(~ethriskid + smoke_cat + radiotherapy + mastectomy + 
+                       chemotherapy + other_surgery + hrt + cancer_stage + 
+                       cancer_grade + progesterone_status + HER2_status + 
+                       cancer_route + vasculitis, data = data_period1)
+
+# Package the dummy variables into its own dataset, ready to bind with the 
+# other, non-dummy parameters #
+dummied <- as.data.frame(predict(dummies, newdata=data_period1))
+
+# Form the ready-to-process dataset by binding the new dummies with the other 
+#numeric parameters #
+data_period1 <- cbind(data_period1[, -c(which(colnames(data_period1) %in% dummy_parameters))], 
+                        dummied)
+
+# Use normalise function - continuous variables are to be normalised/scaled to 
+# be between 0 and 1
+
+normalise <- function(x) {
+  return ((x - min(x)) / (max(x) - min(x)))
+}
+
+data_period1$age_at_diagnosis  <- normalise(data_period1$age_at_diagnosis)
+data_period1$bmi               <- normalise(data_period1$bmi)
+
+
+## Set up the predictors ('x cols') and outcome ('y cols') ##
+## Rename variables (inc. new dummies) where relevant for interpretation of 
+## variable importance and other graphs later ##
+colnames(data_period1)[colnames(data_period1) == 'ethriskid.1']           <- 'White_ethnicity'
+colnames(data_period1)[colnames(data_period1) == 'ethriskid.2']           <- 'Indian_ethnicity'
+colnames(data_period1)[colnames(data_period1) == 'ethriskid.3']           <- 'Pakistani_ethnicity'
+colnames(data_period1)[colnames(data_period1) == 'ethriskid.4']           <- 'Bangladeshi_ethnicity'
+colnames(data_period1)[colnames(data_period1) == 'ethriskid.5']           <- 'Other_Asian_ethnicity'
+colnames(data_period1)[colnames(data_period1) == 'ethriskid.6']           <- 'Black_Caribbean_ethnicity'
+colnames(data_period1)[colnames(data_period1) == 'ethriskid.7']           <- 'Black_African_ethnicity'
+colnames(data_period1)[colnames(data_period1) == 'ethriskid.8']           <- 'Chinese_ethnicity'
+colnames(data_period1)[colnames(data_period1) == 'ethriskid.9']           <- 'Other_ethnicity'
+colnames(data_period1)[colnames(data_period1) == 'smoke_cat.0']           <- 'Non_smoker'
+colnames(data_period1)[colnames(data_period1) == 'smoke_cat.1']           <- 'Ex_smoker'
+colnames(data_period1)[colnames(data_period1) == 'smoke_cat.2']           <- 'Light_smoker'
+colnames(data_period1)[colnames(data_period1) == 'smoke_cat.3']           <- 'Moderate_smoker'
+colnames(data_period1)[colnames(data_period1) == 'smoke_cat.4']           <- 'Heavy_smoker'
+colnames(data_period1)[colnames(data_period1) == 'radiotherapy.1']        <- 'Radiotherapy'
+colnames(data_period1)[colnames(data_period1) == 'mastectomy.1']          <- 'Mastectomy'
+colnames(data_period1)[colnames(data_period1) == 'chemotherapy.1']        <- 'Chemotherapy'
+colnames(data_period1)[colnames(data_period1) == 'other_surgery.1']       <- 'Other_surgery'
+colnames(data_period1)[colnames(data_period1) == 'hrt.1']                 <- 'HRT_use'
+colnames(data_period1)[colnames(data_period1) == 'cancer_stage.1']        <- 'Stage1'
+colnames(data_period1)[colnames(data_period1) == 'cancer_stage.2']        <- 'Stage2'
+colnames(data_period1)[colnames(data_period1) == 'cancer_stage.3']        <- 'Stage3'
+colnames(data_period1)[colnames(data_period1) == 'cancer_stage.4']        <- 'Stage4'
+colnames(data_period1)[colnames(data_period1) == 'cancer_grade.1']        <- 'Well_differentiated'
+colnames(data_period1)[colnames(data_period1) == 'cancer_grade.2']        <- 'Moderately_differentiated'
+colnames(data_period1)[colnames(data_period1) == 'cancer_grade.3']        <- 'Poorly_differentiated'
+colnames(data_period1)[colnames(data_period1) == 'progesterone_status.2'] <- 'PR_positive'
+colnames(data_period1)[colnames(data_period1) == 'HER2_status.1']         <- 'HER2_negative'
+colnames(data_period1)[colnames(data_period1) == 'HER2_status.2']         <- 'HER2_positive'
+colnames(data_period1)[colnames(data_period1) == 'HER2_status.3']         <- 'HER2_borderline'
+colnames(data_period1)[colnames(data_period1) == 'cancer_route.2']        <- 'Emergency_presentation'
+colnames(data_period1)[colnames(data_period1) == 'cancer_route.3']        <- 'GP_referral'
+colnames(data_period1)[colnames(data_period1) == 'cancer_route.4']        <- 'Inpatient_elective'
+colnames(data_period1)[colnames(data_period1) == 'cancer_route.5']        <- 'Other_outpatient_pathway'
+colnames(data_period1)[colnames(data_period1) == 'cancer_route.6']        <- 'Screening_detected'
+colnames(data_period1)[colnames(data_period1) == 'cancer_route.7']        <- 'Two_week_wait'
+colnames(data_period1)[colnames(data_period1) == 'vasculitis.1']          <- 'Vasculitis'
+
+## 'pseudo' are the jack-knife pseudo-values for the Aalen-Johanssen CIF at 10 years ##
+x_cols <-  c('age_at_diagnosis', 'bmi', 'White_ethnicity', 'Indian_ethnicity', 
+             'Pakistani_ethnicity', 'Bangladeshi_ethnicity', 'Other_Asian_ethnicity', 
+             'Black_Caribbean_ethnicity', 'Black_African_ethnicity', 'Chinese_ethnicity', 
+             'Other_ethnicity', 'Non_smoker', 'Ex_smoker', 'Light_smoker', 
+             'Moderate_smoker', 'Heavy_smoker', 'Radiotherapy', 'Mastectomy', 
+             'Chemotherapy', 'Other_surgery', 
+             'HRT_use', 'Stage1', 'Stage2', 'Stage3', 'Stage4', 'Well_differentiated', 
+             'Moderately_differentiated', 'Poorly_differentiated', 'PR_positive', 
+             'HER2_negative', 'HER2_positive', 'HER2_borderline', 
+             'Emergency_presentation', 'GP_referral', 'Inpatient_elective', 
+             'Other_outpatient_pathway', 'Screening_detected', 'Two_week_wait', 
+             'Vasculitis')
+             
+## Target for model fit is Period 1 pseudovalues ##
+## Target for the evaluation are the Period 2 pseudovalues ##
+y_cols <- c('period1_pseudo')
+
+######################################
+## NOW, REPEAT FOR PERIOD 2 DATASET ##
+######################################
+
+data_period2 <- read_dta("OX129_endpoint3_stacked50_period2_pseudovalues.dta")
+str(data_period2)
+## Categorical variables need to be converted into dummy variables ##
+## First, reformat relevant parameters as factors, then convert to dummies #
+data_period1$ethriskid           <- factor(data_period1$ethriskid)                    # Ethnicity 
+data_period1$smoke_cat           <- factor(data_period1$smoke_cat)                    # Smoking status 
+data_period1$cancer_route        <- factor(data_period1$cancer_route)                 # Route to diagnosis
+data_period1$progesterone_status <- factor(data_period1$progesterone_status)          # PR +/-
+data_period1$HER2_status         <- factor(data_period1$HER2_status)                  # HER2 +/-/borderline 
+data_period1$radiotherapy        <- factor(data_period1$radiotherapy)                 # Use of RTx in 1st year 
+data_period1$mastectomy          <- factor(data_period1$mastectomy)                   # Mastectomy in 1st year  
+data_period1$chemotherapy        <- factor(data_period1$chemotherapy)                 # Chemo in 1st year 
+data_period1$other_surgery       <- factor(data_period1$other_surgery)                # Other surgery in 1st year 
+data_period1$cancer_stage        <- factor(data_period1$cancer_stage)                 # Stage (I-IV)
+data_period1$cancer_grade        <- factor(data_period1$cancer_grade)                 # Grade (differentiation)
+data_period1$hrt                 <- factor(data_period1$hrt)                          # Hormone replacement therapy use
+data_period1$vasculitis          <- factor(data_period1$vasculitis)                   # Vasculitis 
+data_period1$sha1                <- factor(data_period1$sha1)                         # Region - used for IECV
+
+# Generate the dummies #
+dummies2 <- dummyVars(~ethriskid + smoke_cat + radiotherapy + mastectomy + 
+                       chemotherapy + other_surgery + hrt + cancer_stage + 
+                       cancer_grade + progesterone_status + HER2_status + 
+                       cancer_route + vasculitis, data = data_period2)
+
+# Package the dummy variables into its own dataset, ready to bind with the
+# other, non-dummy parameters #
+dummied2 <- as.data.frame(predict(dummies2, newdata=data_period2))
+
+# Form the ready-to-process dataset by binding the new dummies with the other 
+# numeric parameters #
+data_period2 <- cbind(data_period2[, -c(which(colnames(data_period2) %in% 
+                                                dummy_parameters))], dummied2)
+
+data_period2$age_at_diagnosis  <- normalise(data_period2$age_at_diagnosis)
+data_period2$bmi               <- normalise(data_period2$bmi)
+
+colnames(data_period2)[colnames(data_period2) == 'ethriskid.1']           <- 'White_ethnicity'
+colnames(data_period2)[colnames(data_period2) == 'ethriskid.2']           <- 'Indian_ethnicity'
+colnames(data_period2)[colnames(data_period2) == 'ethriskid.3']           <- 'Pakistani_ethnicity'
+colnames(data_period2)[colnames(data_period2) == 'ethriskid.4']           <- 'Bangladeshi_ethnicity'
+colnames(data_period2)[colnames(data_period2) == 'ethriskid.5']           <- 'Other_Asian_ethnicity'
+colnames(data_period2)[colnames(data_period2) == 'ethriskid.6']           <- 'Black_Caribbean_ethnicity'
+colnames(data_period2)[colnames(data_period2) == 'ethriskid.7']           <- 'Black_African_ethnicity'
+colnames(data_period2)[colnames(data_period2) == 'ethriskid.8']           <- 'Chinese_ethnicity'
+colnames(data_period2)[colnames(data_period2) == 'ethriskid.9']           <- 'Other_ethnicity'
+colnames(data_period2)[colnames(data_period2) == 'smoke_cat.0']           <- 'Non_smoker'
+colnames(data_period2)[colnames(data_period2) == 'smoke_cat.1']           <- 'Ex_smoker'
+colnames(data_period2)[colnames(data_period2) == 'smoke_cat.2']           <- 'Light_smoker'
+colnames(data_period2)[colnames(data_period2) == 'smoke_cat.3']           <- 'Moderate_smoker'
+colnames(data_period2)[colnames(data_period2) == 'smoke_cat.4']           <- 'Heavy_smoker'
+colnames(data_period2)[colnames(data_period2) == 'radiotherapy.1']        <- 'Radiotherapy'
+colnames(data_period2)[colnames(data_period2) == 'mastectomy.1']          <- 'Mastectomy'
+colnames(data_period2)[colnames(data_period2) == 'chemotherapy.1']        <- 'Chemotherapy'
+colnames(data_period2)[colnames(data_period2) == 'other_surgery.1']       <- 'Other_surgery'
+colnames(data_period2)[colnames(data_period2) == 'hrt.1']                 <- 'HRT_use'
+colnames(data_period2)[colnames(data_period2) == 'cancer_stage.1']        <- 'Stage1'
+colnames(data_period2)[colnames(data_period2) == 'cancer_stage.2']        <- 'Stage2'
+colnames(data_period2)[colnames(data_period2) == 'cancer_stage.3']        <- 'Stage3'
+colnames(data_period2)[colnames(data_period2) == 'cancer_stage.4']        <- 'Stage4'
+colnames(data_period2)[colnames(data_period2) == 'cancer_grade.1']        <- 'Well_differentiated'
+colnames(data_period2)[colnames(data_period2) == 'cancer_grade.2']        <- 'Moderately_differentiated'
+colnames(data_period2)[colnames(data_period2) == 'cancer_grade.3']        <- 'Poorly_differentiated'
+colnames(data_period2)[colnames(data_period2) == 'progesterone_status.2'] <- 'PR_positive'
+colnames(data_period2)[colnames(data_period2) == 'HER2_status.1']         <- 'HER2_negative'
+colnames(data_period2)[colnames(data_period2) == 'HER2_status.2']         <- 'HER2_positive'
+colnames(data_period2)[colnames(data_period2) == 'HER2_status.3']         <- 'HER2_borderline'
+colnames(data_period2)[colnames(data_period2) == 'cancer_route.2']        <- 'Emergency_presentation'
+colnames(data_period2)[colnames(data_period2) == 'cancer_route.3']        <- 'GP_referral'
+colnames(data_period2)[colnames(data_period2) == 'cancer_route.4']        <- 'Inpatient_elective'
+colnames(data_period2)[colnames(data_period2) == 'cancer_route.5']        <- 'Other_outpatient_pathway'
+colnames(data_period2)[colnames(data_period2) == 'cancer_route.6']        <- 'Screening_detected'
+colnames(data_period2)[colnames(data_period2) == 'cancer_route.7']        <- 'Two_week_wait'
+colnames(data_period2)[colnames(data_period2) == 'vasculitis.1']          <- 'Vasculitis' 
+
+## Check dimensions of two sub-sets ##
+dim(data_period1)
+dim(data_period2) 
+
+## Clean up memory by removing the dummied interim datasets 
+rm(dummied) 
+rm(dummied2) 
+
+###############################################
+## Define custom loss function for the model ##
+###############################################
+
+## Define root mean squared error loss function ##
+## This is used to fit the neural network model ##
+
+rmse <- function(y_true, y_pred){
+  K <- backend()
+  loss <- K$sqrt(K$mean((y_true - y_pred)^2))
+  return(loss)
+}
+
+##############################################################
+## Define scoring function for nested cross-validation/IECV ##
+##############################################################
+
+## Need to use the period 1 data for tuning with 5-fold cross-validation ## 
+## Use the period 2 data as the completely held-out test set(s) ## 
+## Below, we set up a loop to iterate this over each region for IECV, but here, 
+# first we set up the Bayesian Optimisation scoring function that will be embedded in this loop ##
+set.seed(1066) 
+  
+scorefunction <- function(epochs, regularisation, units, layers, learnrate){
+  
+  set.seed(1066)
+  
+  k <- 5 
+  indices <- sample(1:nrow(data_fit))                               ## 'data_fit' will be generated from data_period1 subset 
+  folds <- cut(1:length(indices), breaks = k, labels = FALSE)
+  
+  iecv_score <- c() 
+  
+  for (a in 1:k) {
+    
+    iecv_val_indices     <- which(folds==a)
+    
+    iecv_val_data        <- data_fit[iecv_val_indices, ]           ## validation is the heldout 1/5th
+    iecv_val_labels      <- label_fit[iecv_val_indices]            ## for CV loop for hyperparam tuning 
+    
+    iecv_fit_data        <- data_fit[-iecv_val_indices, ]
+    iecv_fit_labels      <- label_fit[-iecv_val_indices]
+    
+    bayes_model <- keras_model_sequential()                        ## Instantiate keras model 
+    for(b in 1:layers){                                            ## loop added to vary number of hidden layers
+      bayes_model %>% 
+        layer_dense(units = units, activation = 'relu', 
+                    regularizer_l2(regularisation), input_shape=c(39))
+    }
+    bayes_model %>% layer_dense(units = 1, activation = "linear") %>% 
+      compile(
+        optimizer = optimizer_adam(lr=learnrate),  
+        loss = rmse,                                                ## Use the above defined custom loss function
+        metrics = "mae"                                             ## Reported as model fits, but not a loss function 
+      )
+    ## Fit the model- batch size= 1024, weights applied for loss function ##
+    bayes_model %>% fit(iecv_fit_data, iecv_fit_labels, epochs=epochs, 
+                     batch_size=1024, verbose=2, sample_weights=weights)
+    
+    iecv_predictions <- predict(bayes_model, iecv_val_data)
+    negative_rmse <- -1*sqrt(mean((iecv_predictions-iecv_val_labels)^2))
+    iecv_score <- c(iecv_score, negative_rmse)
+    
+    rm(bayes_model) 
+   }
+  
+  return(list(Score = mean(iecv_score)))                           ## Return the score (-ve RMSE obtained with each combination to Bayes Optim algorithm)
+  
+ }
+
+#############################################################
+## Define hyperparameter search space - 'bounds' to search ##
+#############################################################
+
+bounds <- list(
+  epochs = c(1L, 20L),                                  ## Number of times model gets fed the data
+  regularisation = c(0.00001, 0.2),                     ## L2 reg: against overfitting
+  units = c(39L, 200L),                                 ## Number of nodes in each layer 
+  layers = c(1L, 5L),                                   ## Between 1 and 5 hidden layers
+  learnrate = c(0.0001, 0.1)  
+)
+
+######################################################
+## Define Bayesian Optimisation function and run it ##
+######################################################
+
+start <- Sys.time()                           ## Time taken is of interest 
+
+iecv_predictions <- c() 
+
+for(d in seq(1:10)) {                        ## 10 regions (sha1) - loop over each of them
+  
+  set.seed(1066)  
+  
+  data_1 <- data_period1[ -which (data_period1$sha1 == 
+                                     levels(data_period1$sha1)[d]), ]          ## Fit data is all regions except region 'a'
+  data_fit       <- as.matrix(data_1[, x_cols])                                ## Form this into matrix of predictors 
+  label_fit      <- as.matrix(data_1[, y_cols])                                ## Form matrix of their pseudovalues
+  weights        <- as.matrix(data_1$imp_weight)                               ## Form matrix of weights (in view of stacked imputations_
+
+  
+  data_2 <- data_period2[ which (data_period2$sha1 == 
+                                    levels(data_period2$sha1)[d]), ]           ## Validation data is region 'a'
+  data_val       <- as.matrix(data_2[, x_cols])                                ## Package matrix of predictors - no need for 'target' pseudovalues here
+  
+  bayesian_neural <- bayesOpt(                                                 ## Bayesian Optimisation command, will run scoring function above on this cross-val loop
+  FUN = scorefunction, 
+  bounds = bounds, 
+  initPoints = 15, 
+  iters.n = 25, 
+  iters.k = 1, 
+  parallel = FALSE, 
+  plotProgress = FALSE, 
+  verbose = 2, 
+  errorHandling = "continue") 
+ 
+  ## Summarise Bayesian Optimisation run ##
+  bayesian_neural$scoreSummary 
+  plot(bayesian_neural) 
+  bestpars <- getBestPars(bayesian_neural)                                      ## Best parameter combination found in this iteration
+  bestpars 
+
+  # Extract optimal hyperparameter config to fit final model on whole 'fit' dataset # 
+  best_epochs <- bestpars[1]
+  best_regularisation <- bestpars[2]
+  best_units <- bestpars[3]
+  best_layers <- toString(bestpars[4])
+  best_learnrate <- as.numeric(bestpars[5]) 
+
+  ## Use same format as above - define the 'final_model' and fit it ##
+  iecv_model <- keras_model_sequential() 
+  for(e in 1:best_layers){
+    iecv_model %>% 
+      layer_dense(units = best_units, activation = 'relu', 
+                regularizer_l2(best_regularisation$best_regularisation), 
+                input_shape=c(39))
+  }
+  iecv_model %>% layer_dense(units = 1, activation = "linear") %>% 
+  compile(
+    optimizer_adam(lr=best_learnrate), 
+    loss = rmse, 
+    metrics = "mae"
+  )
+
+  iecv_model %>% fit(data_fit, label_fit, epochs=best_epochs, 
+                    batch_size=1024, verbose=2, sample_weights=weights)              ## Fit model to period 1 data from all regions except 'a'
+
+predictions <- predict(iecv_model, data_val)                                         ## Test model on period 2 data for region 'a'
+iecv_predictions[[d]] = predictions                                                  ## Store the predictions as loop iterates 
+
+rm(iecv_model)                                                                       ## Clear out so that model can be refitted on next loop iteration without stacking networks...
+
+}
+
+end <- Sys.time() 
+end-start                                                                            ## Took 1.92 days on my set-upwith GPU 
+
+
+###########################################
+# Combine predictions generated from IECV #
+###########################################
+nnet_iecv_predictions <-    c(iecv_predictions[[1]], iecv_predictions[[2]], 
+                              iecv_predictions[[3]], iecv_predictions[[4]], 
+                              iecv_predictions[[5]], iecv_predictions[[6]],
+                              iecv_predictions[[7]], iecv_predictions[[8]], 
+                              iecv_predictions[[9]], iecv_predictions[[10]])
+
+summary(nnet_iecv_predictions)
+
+## Combine with individual ID numbers so those can be linked up later ##
+
+patid <- as.data.frame(data_period2$patid)
+export_predictions <- cbind(patid, nnet_iecv_predictions)
+head(export_predictions)
+
+## Save these for use in Stata for evaluation ##
+
+setwd("/estimates/ML_IECV_predictions/")
+write.csv(export_predictions, "endpoint3_nnet_iecv_predictions.csv")
+
+
+###############################################################################################
+###############################################################################################
+###############################################################################################
+

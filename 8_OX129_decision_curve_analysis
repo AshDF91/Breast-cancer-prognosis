@@ -65,6 +65,11 @@ drop _merge
  
  stdca cox crr xgb nnet, timepoint(10) prob(yes yes yes yes) smooth lpattern(solid solid dash dash dash dash)
  graph save "Graph" "\graphs\EP3_decisioncurve_all_models.gph", replace 
+ 
+ * Now, run version that takes u=into account competing risks - key one ! 
+ stdca cox crr xgb nnet, timepoint(10) prob(yes yes yes yes) smooth lpattern(solid solid dash dash dash dash) compet1(2)    // competing event is iecv_event=2 (=other death) 
+ graph save "Graph" "\graphs\EP3_decisioncurve_all_models.gph", replace 
+ 
  clear 
  
  *******************************************************************************

@@ -102,6 +102,7 @@ graph save "\graphs\ep3_competing\calibration_neuralnet_iecv.gph", replace
 * Calibration of neural network - pooled predictions * 
 * Again, predicted and observed predictions are on same scale, so use linear model - robust standard errors to account for non-independence of observations * 
 mi estimate, dots: glm period2_pseudo predictions, link(id) vce(robust) irls 
+mi estimate, dots: glm period2_pseudo predictions, offset(predictions) link(id) vce(robust) irls  
  
 * Discrimination - pooled predictions * 
 mi register regular ipcw                                                                              // ipc weights - one for each patient
@@ -125,6 +126,10 @@ forval x = 1(1)9 {
 * Calibration slope and calibration-in-the-large * 
 forval x = 1(1)9 {
 	mi estimate, dots esampvaryok: glm period2_pseudo predictions if ethriskid==`x', irls vce(robust)      // Again, predicted and observed probabilities on same scale - generalised linear model 
+}
+
+forval x = 1(1)9 {
+	mi estimate, dots esampvaryok: glm period2_pseudo predictions if ethriskid==`x', offset(predictions) irls vce(robust)      
 }
 
 ************************************************
@@ -171,14 +176,14 @@ postfile `slope_EP3regionnnet' slope slope_se val_size using slope_EP3regionnnet
   postclose `slope_EP3regionnnet'  
   
 ****************************************
-* GT IECV for calibration-in-the-large *                           // CITL is the intercept term
+* GT IECV for calibration-in-the-large *                           // CITL is the intercept term when constrainnig slope to 1 
 
 capture postutil clear   
 tempname citl_EP3regionnnet
 postfile `citl_EP3regionnnet' citl citl_se val_size using citl_EP3regionnnet.dta , replace 
   
   forval x = 1(1)10 { 
-  mi estimate, dots: glm period2_pseudo prediction if sha1==`x', irls vce(robust)  
+  mi estimate, dots: glm period2_pseudo prediction if sha1==`x', offset(prediction) irls vce(robust)  
   local citl = r(table)[1,2]
   local citl_se = r(table)[2,2]
   local val_size = e(N)
@@ -360,6 +365,7 @@ graph save "\graphs\ep3_competing\calibration_xgboost_iecv.gph", replace
 
 * Calibration of neural network - pooled predictions * 
 mi estimate, dots: glm period2_pseudo prediction, link(id) vce(robust) irls
+mi estimate, dots: glm period2_pseudo prediction, offset(prediction) link(id) vce(robust) irls
  
 * Discrimination - pooled predictions * 
 mi register regular ipcw 
@@ -382,6 +388,10 @@ forval x = 1(1)9 {
 * Calibration slope and calibration-in-the-large * 
 forval x = 1(1)9 { 
 	mi estimate, dots esampvaryok: glm period2_pseudo prediction if ethriskid==`x', irls vce(robust) 
+}
+
+forval x = 1(1)9 { 
+	mi estimate, dots esampvaryok: glm period2_pseudo prediction if ethriskid==`x', offset(prediction) irls vce(robust) 
 }
 
 ************************************************
@@ -438,7 +448,7 @@ tempname citl_EP3regionxgboost
 postfile `citl_EP3regionxgboost' citl citl_se val_size using citl_EP3regionxgboost.dta , replace 
   
   forval x = 1(1)10 { 
-  mi estimate, dots: glm period2_pseudo prediction if sha1==`x', irls vce(robust)  
+  mi estimate, dots: glm period2_pseudo prediction if sha1==`x', offset(prediction) irls vce(robust)  
   local citl = r(table)[1,2]
   local citl_se = r(table)[2,2]
   local val_size = e(N)

@@ -242,8 +242,8 @@ start <- Sys.time()                              ## Like to time things
 bayesian_boost <- bayesOpt(
   FUN = scorefunction, 
   bounds = bounds,                               ## Tells function which search space to use
-  initPoints = 15,                               ## 15 trials first, followed by 
-  iters.n = 25,                                  ## 25 iterations of BO 
+  initPoints = 45,                               ## 45 trials first, followed by 
+  iters.n = 15,                                  ## 15 iterations of BO thereafter. 
   iters.k = 1, 
   parallel = FALSE, 
   verbose = 2, 
@@ -620,8 +620,8 @@ set.seed(1066)
   bayesian_boost <- bayesOpt(                                                
   FUN = scorefunction, 
   bounds = bounds, 
-  initPoints = 15, 
-  iters.n = 25,
+  initPoints = 45, 
+  iters.n = 15,
   iters.k = 1, 
   parallel = FALSE, 
   verbose = 1, 
@@ -678,7 +678,7 @@ set.seed(1066)
 ## LOOP ENDS ##
 
 end <-Sys.time() 
-end-start            ## Takes approx. 1.8 days with GPU support on my server 
+end-start            ## Takes approx. 1.5 days with GPU support on my server 
 
 #####################################
 # POOLING THE PREDICTIONS FROM IECV #

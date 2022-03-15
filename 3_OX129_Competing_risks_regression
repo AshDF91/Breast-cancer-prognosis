@@ -342,6 +342,7 @@ use "\final_datasets\OX129_endpoint3_competingrisk_IECV.dta" , clear
 * Calibration slope and calibration-in-the-large * 
 * Since predicted probabilities and pseudovalues are on same scale - linear regression * 
 mi estimate, dots: glm period2_pseudo iecv_probabilities, vce(robust)  
+mi estimate, dots: glm period2_pseudo iecv_probabilities, offset(iecv_probabilities) vce(robust)  
 
 * Harrell's C - inverse probability of censoring weighted *
 mi register regular ipcw                                                 // Tell Stata that each individual has this in every imputation 
@@ -364,6 +365,10 @@ forval x = 1(1)9 {
 * Calibration slope and calibration-in-the-large * 
 forval x = 1(1)9 { 
 	mi estimate, dots esampvaryok: glm period2_pseudo iecv_probabilities if ethriskid==`x', vce(robust) irls 
+}
+
+forval x = 1(1)9 { 
+	mi estimate, dots esampvaryok: glm period2_pseudo iecv_probabilities if ethriskid==`x', offset(iecv_probabilities) vce(robust) irls 
 }
 
 ********************************************************************************
@@ -416,10 +421,10 @@ postfile `slope_EP3regioncompeting' slope slope_se val_size using slope_EP3regio
 
 capture postutil clear   
 tempname citl_EP3regioncompeting
-postfile `citl_EP3regioncompeting' citl citl_se val_size using citl_EP3regioncompeting.dta , replace               // same model but take intercept term 
+postfile `citl_EP3regioncompeting' citl citl_se val_size using citl_EP3regioncompeting.dta , replace               // offset used to constrain slope to 1, take the intercept
   
   forval x = 1(1)10 { 
-  mi estimate, dots: glm period2_pseudo iecv_probabilities if (sha1==`x' & period==2), vce(robust) irls 
+  mi estimate, dots: glm period2_pseudo iecv_probabilities if (sha1==`x' & period==2), offset(iecv_probabilities) vce(robust) irls 
   local citl = r(table)[1,2]
   local citl_se = r(table)[2,2]
   local val_size = e(N)

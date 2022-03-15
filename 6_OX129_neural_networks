@@ -285,8 +285,8 @@ start <- Sys.time()
 bayesian_neural <- bayesOpt(
   FUN = scorefunction, 
   bounds = bounds, 
-  initPoints = 15, 
-  iters.n = 25, 
+  initPoints = 45, 
+  iters.n = 15, 
   iters.k = 1, 
   parallel = FALSE, 
   plotProgress = TRUE, 
@@ -679,8 +679,8 @@ for(d in seq(1:10)) {                        ## 10 regions (sha1) - loop over ea
   bayesian_neural <- bayesOpt(                                                 ## Bayesian Optimisation command, will run scoring function above on this cross-val loop
   FUN = scorefunction, 
   bounds = bounds, 
-  initPoints = 15, 
-  iters.n = 25, 
+  initPoints = 45, 
+  iters.n = 15, 
   iters.k = 1, 
   parallel = FALSE, 
   plotProgress = FALSE, 

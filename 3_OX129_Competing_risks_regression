@@ -2,7 +2,7 @@
 
 
 ## Multiple imputation has already been carried out in accordance with principles
-## for Cox models (e.g. including endpoint, Nelson-Aalen cumulative hazard function ##
+## for Cox models (e.g. including endpoint, Aalen-Johanssen cumulative hazard function ##
 
 ## Strategy here is, using the same set of 50 imputations, to permit and identify optimal FP terms 
 ## for age/BMI/Townsend score for a pseudo-observations-based competing risks regression model, 
@@ -18,15 +18,9 @@
 * repeat the processing steps to: 
 * Find the optimal FP terms for age, BMI, Townsend
 
-* Start with the imputed dataset used for IECV in previous Cox modelling * 
-use "\final_datasets\OX129_endpoint3_imputed_IECV.dta", clear 
+* Start with the original dataset (complete case, not yet imputed) * 
+use "\final_datasets\OX129_endpoint3.dta", clear 
 count 
-
-* Extract complete case data, so we can start again * 
-mi extract 0 
-drop Iage___1 Iage___2 Itown__1 Idiag__1 Idiag__2 Inode__1 Inode__2 Inodea_1 Inodea_2    \\ drop previously generated FP terms for Cox model
-* Drop all previously calculated baselines, pseudovalues, linear predictors, etc. * 
-drop baseline_surv baseline_surv_10yr risk10yr censind timesplit iecv_event iecv_xb time hr townsend      \\ keep clear and clean 
 
 * Stset the data, estimate pseudovalues for the cumulative incidence function *  
 * exit3status = contains all cause death (use to define competing event)
@@ -59,8 +53,7 @@ mfp, all: glm pseudo age_at_diagnosis diagnosis_bmi town_int                    
 * Review FP terms returned - age and BMI have non-linear terms, Townsend = 1 * 
 * Age = 1, 2  (different than Cox model)
 * BMI at diagnosis = -2, -2 (same as Cox model)
-* Townsend = 1, so keep linear. Let's 'undo' the scaling, and drop Itown
-drop Itown__1  
+* Townsend = 1, so keep linear. Let's 'undo' the scaling, and drop Itown 
 
 * Plotting FP terms for the competing risks models * 
 glm pseudo Iage*, link(cloglog) irls                                              \\ Model on cloglog scale, iteratively weighted least squares for maximisation
@@ -85,19 +78,20 @@ clear
 
 ********************************************************************************
 
-use "\final_datasets\OX129_endpoint3_imputed_IECV.dta", clear                     \\ Same set of 50 imputations used for Cox models 
+use "\final_datasets\OX129_endpoint3_imputed.dta", clear                     \\ Same set of 50 imputations used for Cox models 
 count 
 
-* Drop all previously calculated baselines, pseudovalues, linear predictors, etc. * 
-drop baseline_surv baseline_surv_10yr risk10yr censind timesplit iecv_event iecv_xb time townsend     \\ Clear out variables 
-
 * Generate the new FP term for age - we will have FP terms (1,2) for CR model* 
-gen Iage___3 = (age_at_diagnosis/10)-6.301833523                                   
-summ Iage___3, det 
-* Does not need registering as imputed as age is complete for all * 
+* Detail on scale, etc. from mfp command above * 
+gen double age_fp1 = (age_at_diagnosis/10) - 6.301833523
+gen double age_fp2 = (age_at_diagnosis/10)^2 - 39.71310575
+summ age_fp1, det 
+summ age_fp2, det 
 
-* Convert imputed town_int vars to original scale * 
-mi passive: gen townsend = Itown__1 - 0.5719195882                               \\ FP power was 1, so mfp centered it. Undo. 
+* Generate the BMI terms * 
+mi passive: gen double bmi_x = bmi/10 
+mi passive: gen double bmi_fp1 = (bmi_x^-2) - 0.1353749689
+mi passive: gen double bmi_fp2 = (bmi_x^-2)*ln(bmi_x) = 0.1353551232
 
 * Stset the data, estimate pseudovalues for the cumulative incidence function *  
 * exit3status = contains all cause death (use to define competing event)
@@ -126,23 +120,23 @@ summ pseudo, det
 * Fit the 'full' model - generalised linear model with cloglog link functon to approximate Fine-Gray; iteratively rewighted least squares for maximisation 
 * Robust standard errors in view of non-independence of pseudovalues * 
 
-timer on 1 
-mi estimate, dots eform: glm pseudo Iage___2 Iage___3 Idiag* townsend i.ethriskid i.smoke_cat ib6.cancer_route //
+global covariates_crr = "age_fp* bmi_fp* townsend i.ethriskid i.smoke_cat ib6.cancer_route                         //
 ib2.progesterone ib2.HER2 i.fh_breastca i.radio i.chemo i.mastect i.other_surg i.cancer_stage i.cancer_grade i.ckd //
-i.htn i.ihd i.cirrhosis i.lupus i.vasculitis i.type1dm i.type2dm i.thiazide i.betablocker i.raa i.acei i.a2a//
+i.htn i.ihd i.cirrhosis i.lupus i.vasculitis i.type1dm i.type2dm i.thiazide i.betablocker i.raa i.acei i.a2a       //
 i.cablocker i.tca i.ssri i.otherantidepress i.maoi i.ocp i.hrt i.anti_psycho c.Iage___2##i.mastectomy c.Iage___3##i.mastectomy//
 c.Iage___2##i.chemotherapy c.Iage___3##i.chemotherapy c.Iage___2##i.other_surgery c.Iage___3##i.other_surgery //
 c.Iage___2##i.fh_breastca c.Iage___3##i.fh_breastca c.Iage___2##i.ethriskid c.Iage___3##i.ethriskid i.mastectomy##i.ethriskid //
-i.other_surg##i.ethriskid, link(cloglog) vce(robust) irls                         
+i.other_surg##i.ethriskid"
+
+timer on 1 
+mi estimate, dots eform: glm pseudo $covariates_crr, link(cloglog) vce(robust) irls                         
 timer off 1 
 timer list 
 timer clear 
 
 * Selected covariates - SHR<0.9 or >1.1, with p<0.05; interactions if p<0.05 * 
 * For categories, if 1 of the sub-groups is sig, retain variable * 
-global covariates = "Iage___2 Iage___3 Idiag* i.ethriskid i.smoke_cat ib6.cancer_route ib2.progesterone ib2.HER2 // 
-i.radio i.chemo i.mastect i.other_surg i.cancer_stage i.cancer_grade i.vasculitis i.hrt c.Iage___3##i.mastectomy //
-c.Iage___2##i.other_surgery c.Iage___3##i.other_surgery" 
+global covariates = " " 
 
 * Fit the final model * 
 mi estimate, dots eform: glm pseudo $covariates, link(cloglog) vce(robust) irls 

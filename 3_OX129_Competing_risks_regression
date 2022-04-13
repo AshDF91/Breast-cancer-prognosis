@@ -120,13 +120,11 @@ summ pseudo, det
 * Fit the 'full' model - generalised linear model with cloglog link functon to approximate Fine-Gray; iteratively rewighted least squares for maximisation 
 * Robust standard errors in view of non-independence of pseudovalues * 
 
-global covariates_crr = "age_fp* bmi_fp* townsend i.ethriskid i.smoke_cat ib6.cancer_route                         //
-ib2.progesterone ib2.HER2 i.fh_breastca i.radio i.chemo i.mastect i.other_surg i.cancer_stage i.cancer_grade i.ckd //
-i.htn i.ihd i.cirrhosis i.lupus i.vasculitis i.type1dm i.type2dm i.thiazide i.betablocker i.raa i.acei i.a2a       //
-i.cablocker i.tca i.ssri i.otherantidepress i.maoi i.ocp i.hrt i.anti_psycho c.Iage___2##i.mastectomy c.Iage___3##i.mastectomy//
-c.Iage___2##i.chemotherapy c.Iage___3##i.chemotherapy c.Iage___2##i.other_surgery c.Iage___3##i.other_surgery //
-c.Iage___2##i.fh_breastca c.Iage___3##i.fh_breastca c.Iage___2##i.ethriskid c.Iage___3##i.ethriskid i.mastectomy##i.ethriskid //
-i.other_surg##i.ethriskid"
+global covariates_crr = "age_fp* bmi_fp* townsend i.ethriskid i.alcohol_cat i.smoke_cat ib6.cancer_route ib2.pr_status, ib2.her2_status,                         //
+i.fh_breastca i.radio i.chemo i.mastectomy i.other_surg i.cancer_stage i.cancer_grade i.ckd i.cirrhosis i.htn i.ihd i.t1dm i.t2dm i.vasculitis                   //
+i.lupus i.thiazide i.betablocker i.acei i.raa i.tca i.ssri i.maoi i.otherantidepress i.ocp i.hrt i.anti_psycho c.age_fp1##i.chemo c.age_fp2##i.chemo             //
+c.age_fp1##i.mastec c.age_fp2##i.mastec c.age_fp1##i.other_surg c.age_fp2##i.other_surg c.age_fp1##i.fh_breastca c.age_fp2##i.fh_breastca i.ethriskid##c.age_fp1 //
+i.ethriskid##c.age_fp2 i.ethriskid##i.other_surg i.ethriskid##i.mastectomy i.ethriskid##i.chemotherapy i.ethriskid##i.radiotherapy"
 
 timer on 1 
 mi estimate, dots eform: glm pseudo $covariates_crr, link(cloglog) vce(robust) irls                         
@@ -134,16 +132,20 @@ timer off 1
 timer list 
 timer clear 
 
-* Selected covariates - SHR<0.9 or >1.1, with p<0.05; interactions if p<0.05 * 
-* For categories, if 1 of the sub-groups is sig, retain variable * 
-global covariates = " " 
+* Save exponentaited coefficients for pre-selection model * 
+cd "\models\Endpoint_3\"
+parmest, list(,) saving(CR_endpoint3_parmest_preselection.dta, replace) label eform for(estimate min95 max95) 
+
+* Selected covariates - SHR<0.9 or >1.1, with p<0.01; interactions if p<0.01 *
+* For categories, if >1 of the sub-groups is sig, and (if relevant) 'dose' trend seend, retain variable * 
+global select_covariates_crr = "age_fp* bmi_fp* i.smoke_cat i.ib6.cancer_route ib2.pr_status ib2.her2_status ib2.er_status i.radio i.mastectomy i.other_surg i.cancer_stage i.cancer_grade i.hrt c.age_fp1##i.other_surg" 
 
 * Fit the final model * 
-mi estimate, dots eform: glm pseudo $covariates, link(cloglog) vce(robust) irls 
+mi estimate, dots eform: glm pseudo $select_covariates_crr, link(cloglog) vce(robust) irls 
 
 * Save coefficients and constant term for later plotting/use * 
-cd "\models\Endpoint_3\"
-parmest, list(,) saving(CR_endpoint3_parmest.dta, replace) label eform for(estimate min95 max95)      // Save the model coefficients 
+parmest, list(,) saving(CR_endpoint3_parmest.dta, replace) label eform for(estimate min95 max95)      // Save the model as 'SHRs'
+parmest, list(,) saving(CR_endpoint3_parmest_coefs.dta, replace) label for(estimate min95 max95)      // Save the model as coefficients 
 
 
 ********************************************************************************
@@ -158,16 +160,14 @@ gen base_ipcw = .
 summ basechazard if _t==10                                                                          // Nelson-Aalen cumulative hazard for censoring at 10 years 
 replace base_ipcw = r(mean) if period==2 
 
-global covariates = "Iage___2 Iage___3 Idiag* i.ethriskid i.smoke_cat ib6.cancer_route ib2.progesterone //
-ib2.HER2 i.radio i.chemo i.mastect i.other_surg i.cancer_stage i.cancer_grade i.vasculitis i.hrt //
-c.Iage___3##i.mastectomy c.Iage___2##i.other_surgery c.Iage___3##i.other_surgery"
-
-mi estimate, dots saving(ipcw, replace): stcox $covariates if period==2, estimate efron                 // Fit model for censoring times, rather than death times
+cd "\models\Endpoint_3\"
+mi estimate, dots saving(ipcw, replace): stcox $select_covariates_crr if period==2, estimate efron      // Fit model for censoring times, rather than death times
 mi predict xbC using ipcw if period==2, xb                                                              // Linear predictor (xb) from this censoring model 
+summ xbC, det 
 
 gen prob_cens = (exp(-base_ipcw)^exp(xbC))                                                              // Combine baseline 'hazard' with linear predictor for censoring  
 summ prob_cens, det 
-gen ipcw = 1/prob_cens                                                                                  // Inverse probability of censoring 
+gen ipcw = 1/prob_cens                                                                                  // Inverse probability of being censored 
 summ ipcw, det 
 
 *Ensure data adequately re-stset - endpoint is breast cancer death * 
@@ -272,11 +272,10 @@ mi convert flong                                                     // Takes a 
 * Then, we can use them for the pooled overall metrics, but also to calculate centre-specific estimates *  
 gen iecv_xb = .  
 
-global covariates = "Iage___2 Iage___3 Idiag* i.ethriskid i.smoke_cat ib6.cancer_route ib2.progesterone //
-ib2.HER2 i.radio i.chemo i.mastect i.other_surg i.cancer_stage i.cancer_grade i.vasculitis i.hrt //
-c.Iage___3##i.mastectomy c.Iage___2##i.other_surgery c.Iage___3##i.other_surgery"
+global select_covariates_crr = "age_fp* bmi_fp* i.smoke_cat i.ib6.cancer_route ib2.pr_status ib2.her2_status ib2.er_status i.radio i.mastectomy i.other_surg i.cancer_stage i.cancer_grade i.hrt c.age_fp1##i.other_surg" 
 
-** Imputation numbers 7 and 29 cause issues with model not converging on them * 
+
+** Imputation numbers 7 and 29 cause intermittent issues with model not converging on them * 
 * This leads to missing predictions when using mi predict, which affects downstream code * 
 * Therefore, remove these 2 imputations (48/50) and use these throughout the 
 * evaluation steps * 
@@ -287,7 +286,7 @@ mi describe                                             // Therefore, better to 
 cd "\estimates\"
 
 forval x = 1(1)10 {                                      // 10 geographical regions
-	mi estimate, dots errorok notable saving(myestiecv, replace): glm period1_pseudo $covariates if (sha1!=`x' & period==1), link(cloglog) irls vce(robust)
+	mi estimate, dots errorok notable saving(myestiecv, replace): glm period1_pseudo $select_covariates_crr if (sha1!=`x' & period==1), link(cloglog) irls vce(robust)
 	mi predict double xb if (sha1==`x' & period==2) using myestiecv, xb storecompleted 
 	replace iecv_xb = xb if iecv_xb==. 
 	drop xb 
@@ -334,9 +333,10 @@ clear
 use "\final_datasets\OX129_endpoint3_competingrisk_IECV.dta" , clear 
 
 * Calibration slope and calibration-in-the-large * 
-* Since predicted probabilities and pseudovalues are on same scale - linear regression * 
-mi estimate, dots: glm period2_pseudo iecv_probabilities, vce(robust)  
-mi estimate, dots: glm period2_pseudo iecv_probabilities, offset(iecv_probabilities) vce(robust)  
+* Use the cloglog transform of predicted probabilities, and model on cloglog scale * 
+gen cll_pred = log(-log(1-iecv_prob))                              // data is mi stset flong 
+mi estimate, dots: glm period2_pseudo cll_pred, link(cloglog) vce(robust) noconstant irls   
+mi estimate, dots: glm period2_pseudo cll_pred, link(cloglog) vce(robust) noconstant itls offset(cll_pred)  
 
 * Harrell's C - inverse probability of censoring weighted *
 mi register regular ipcw                                                 // Tell Stata that each individual has this in every imputation 
@@ -345,24 +345,51 @@ mi stset follow_up if period==2, failure(endpoint==1) exit(time 10)
 gen censind = 1-_d if _st==1 & period==2                                 // need censoring indicator 
 mi estimate, cmdok dots: somersd _t invprob if (_st==1 & period==2) [iweight=ipcw], cenind(censind) tdist transf(c)    // Weight each contribution by IPCensoring 
 
-
-* Discrimination and calibration in different ethnic groups * 
+*************************************************************
+* Discrimination and calibration in different ethnic groups *
+*************************************************************
 * Using esampvarok means that we can use imputed data - ethnicity may vary across 
 * imputation if was originally missing for that individual * 
 
-tab ethriskid _d if period==2 & _mi_m==0                              // Counts in complete case data as this is stationary 
+tab ethriskid _d if period==2 & _mi_m==0, m                              // Counts in complete case data as this is stationary 
 
 forval x = 1(1)9 {
 	mi estimate, cmdok dots esampvaryok: somersd _t invprob if (_st==1 & period==2 & ethriskid==`x') [iweight=ipcw], cenind(censind) tdist transf(c)
   }
 
-* Calibration slope and calibration-in-the-large * 
+* Calibration slope * 
 forval x = 1(1)9 { 
-	mi estimate, dots esampvaryok: glm period2_pseudo iecv_probabilities if ethriskid==`x', vce(robust) irls 
+	mi estimate, dots esampvaryok: glm period2_pseudo cll_pred if ethriskid==`x', link(cloglog) vce(robust) noconstant irls 
 }
 
+* Calibration-in-the-large * 
 forval x = 1(1)9 { 
-	mi estimate, dots esampvaryok: glm period2_pseudo iecv_probabilities if ethriskid==`x', offset(iecv_probabilities) vce(robust) irls 
+	mi estimate, dots esampvaryok: glm period2_pseudo cll_pred if ethriskid==`x', link(cloglog) vce(robust) noconstant irls offset(cll_pred)  
+}
+
+*****************************
+* Performance in age groups * 
+*****************************
+gen agegroup = 1 
+replace agegroup = 2 if age_at_diagnosis>=30 
+replace agegroup = 3 if age_at_diagnosis>=40 
+replace agegroup = 4 if age_at_diagnosis>=50 
+replace agegroup = 5 if age_at_diagnosis>=60 
+replace agegroup = 6 if age_at_diagnosis>=70 
+replace agegroup = 7 if age_at_diagnosis>-80 
+
+forval x = 1(1)7 {
+	mi estimate, cmdok dots esampvaryok: somersd _t invprob if (_st==1 & period==2 & agegroup==`x') [iweight=ipcw], cenind(censind) tdist transf(c)
+  }
+
+* Calibration slope * 
+forval x = 1(1)7 { 
+	mi estimate, dots esampvaryok: glm period2_pseudo cll_pred if agegroup==`x', link(cloglog) vce(robust) noconstant irls 
+}
+
+* Calibration-in-the-large * 
+forval x = 1(1)7 { 
+	mi estimate, dots esampvaryok: glm period2_pseudo cll_pred if agegroup==`x', link(cloglog) vce(robust) noconstant irls offset(cll_pred)  
 }
 
 ********************************************************************************
@@ -401,7 +428,7 @@ tempname slope_EP3regioncompeting
 postfile `slope_EP3regioncompeting' slope slope_se val_size using slope_EP3regioncompeting.dta , replace          // linear regression between predicted and observed probs 
   
   forval x = 1(1)10 {
-  mi estimate, dots: glm period2_pseudo iecv_probabilities if (sha1==`x' & period==2), vce(robust) irls 
+  mi estimate, dots: glm period2_pseudo cll_pred if (sha1==`x' & period==2), link(cloglog) vce(robust) irls noconstant  
   local slope = r(table)[1,1]             
   local slope_se = r(table)[2,1]
   local val_size = e(N)
@@ -418,9 +445,9 @@ tempname citl_EP3regioncompeting
 postfile `citl_EP3regioncompeting' citl citl_se val_size using citl_EP3regioncompeting.dta , replace               // offset used to constrain slope to 1, take the intercept
   
   forval x = 1(1)10 { 
-  mi estimate, dots: glm period2_pseudo iecv_probabilities if (sha1==`x' & period==2), offset(iecv_probabilities) vce(robust) irls 
-  local citl = r(table)[1,2]
-  local citl_se = r(table)[2,2]
+  mi estimate, dots: glm period2_pseudo cll_pred if (sha1==`x' & period==2), link(cloglog) vce(robust) irls noconstant offset(cll_pred)  
+  local citl = r(table)[1,1]
+  local citl_se = r(table)[2,1]
   local val_size = e(N)
   post `citl_EP3regioncompeting' (`citl') (`citl_se') (`val_size')
   }
@@ -453,7 +480,7 @@ input str60 region                                                     // Make n
 "West Midlands (1,032/8,678)"
 "Yorkshire & Humber (484/3,946)"
 end
-meta set beta st_err, studylab(region)
+meta set beta st_err, studylab(region) eslabel("Harrell's C")
 meta summarize, random(sjonkman) se(khartung) predinterval(95)
 meta forestplot, random(sjonkman) se(khartung) predinterval(95) 
 graph save "Graph" "\graphs\EP3_harrellsC_competing.gph", replace 
@@ -472,9 +499,9 @@ input str60 region
 "West Midlands (1,032/8,678)"
 "Yorkshire & Humber (484/3,946)"
 end
-meta set slope slope_se, studylab(region)
+meta set slope slope_se, studylab(region) eslabel("Calibration slope") 
 meta summarize, random(sjonkman) se(khartung) predinterval(95)
-meta forestplot, random(sjonkman) se(khartung) predinterval(95) 
+meta forestplot, random(sjonkman) se(khartung) predinterval(95) xline(1)
 graph save "Graph" "\graphs\EP3_slope_competing.gph", replace 
 clear
 
@@ -491,9 +518,9 @@ input str60 region
 "West Midlands (1,032/8,678)"
 "Yorkshire & Humber (484/3,946)"
 end
-meta set citl citl_se, studylab(region)
+meta set citl citl_se, studylab(region) eslabel("Calibration-in-the-large") 
 meta summarize, random(sjonkman) se(khartung) predinterval(95)
-meta forestplot, random(sjonkman) se(khartung) predinterval(95) 
+meta forestplot, random(sjonkman) se(khartung) predinterval(95) xline(0)
 graph save "Graph" "\graphs\EP3_citl_competing.gph", replace 
 clear
 

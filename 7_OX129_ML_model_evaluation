@@ -29,8 +29,8 @@ bys patid: gen m = _n                                                           
 * Clip the predictions to be between 0 and 1 - they are probabilities * 
 count if predictions<0
 count if predictions>1
-replace predictions = 0 if predictions<0 
-replace predictions = 1 if predictions>1 
+replace predictions = 0.0000001 if predictions<0      ## Miniscule risk rather than zero, will use cloglog transform later!
+replace predictions = 0.9999999 if predictions>1      ## Rather than guaranteed risk 
 
 * Save this as interim dataset * 
 save "\ML_IECV_predictions\endpoint3_nnet_iecv_predictions_formatted.dta", replace
@@ -99,10 +99,13 @@ ytitle("Observed event probability", size(small)) addplot(function y=x) graphreg
 
 graph save "\graphs\ep3_competing\calibration_neuralnet_iecv.gph", replace
 
+* Use the cloglog transform of predictions for overall calibration metrics * 
+mi passive: gen cll_pred = log(-log(1-prediction)) 
+
 * Calibration of neural network - pooled predictions * 
-* Again, predicted and observed predictions are on same scale, so use linear model - robust standard errors to account for non-independence of observations * 
-mi estimate, dots: glm period2_pseudo predictions, link(id) vce(robust) irls 
-mi estimate, dots: glm period2_pseudo predictions, offset(predictions) link(id) vce(robust) irls  
+* 'Observed' (pseudo)probability, regress on cloglog of prediction, model on cloglog scale * 
+mi estimate, dots: glm period2_pseudo cll_pred, link(cloglog) vce(robust) noconstant irls 
+mi estimate, dots: glm period2_pseudo cll_pred, link(cloglog) vce(robust) noconstant irls offset(cll_pred)   
  
 * Discrimination - pooled predictions * 
 mi register regular ipcw                                                                              // ipc weights - one for each patient
@@ -123,14 +126,44 @@ forval x = 1(1)9 {
 	mi estimate, dots esampvaryok: somersd _t invhr if (_st==1 & ethriskid==`x') [iweight=ipcw], cenind(censind) tdist transf(c)    // Again, ethnic group may vary across imputations, so permit this to be captured when making full use of imputed data 
   } 
 
-* Calibration slope and calibration-in-the-large * 
+* Calibration slope * 
 forval x = 1(1)9 {
-	mi estimate, dots esampvaryok: glm period2_pseudo predictions if ethriskid==`x', irls vce(robust)      // Again, predicted and observed probabilities on same scale - generalised linear model 
+	mi estimate, dots esampvaryok: glm period2_pseudo cll_pred if ethriskid==`x', link(cloglog) noconstant irls vce(robust)      // Estimate per-ethnic gorup result in each imputation, then pool 
 }
 
+* Calibration in the large * 
 forval x = 1(1)9 {
-	mi estimate, dots esampvaryok: glm period2_pseudo predictions if ethriskid==`x', offset(predictions) irls vce(robust)      
+	mi estimate, dots esampvaryok: glm period2_pseudo cll_pred if ethriskid==`x', link(cloglog) noconstant irls vce(robust) offset(cll_pred)      
 }
+
+
+**************
+* Age groups *
+**************
+gen agegroup = 1 
+replace agegroup = 2 if age_at_diagnosis>=30 
+replace agegroup = 3 if age_at_diagnosis>=40 
+replace agegroup = 4 if age_at_diagnosis>=50 
+replace agegroup = 5 if age_at_diagnosis>=60 
+replace agegroup = 6 if age_at_diagnosis>=70 
+replace agegroup = 7 if age_at_diagnosis>=80 
+tab agegroup 
+
+* Discrimination and calibration in different age bands * 
+forval x = 1(1)7 {
+	mi estimate, dots: somersd _t invhr if (_st==1 & agegroup==`x') [iweight=ipcw], cenind(censind) tdist transf(c)    
+  } 
+
+* Calibration slope * 
+forval x = 1(1)7 {
+	mi estimate, dots: glm period2_pseudo cll_pred if agegroup==`x', link(cloglog) noconstant irls vce(robust)     
+}
+
+* Calibration in the large * 
+forval x = 1(1)7 {
+	mi estimate, dots: glm period2_pseudo cll_pred if agegroup==`x', link(cloglog) noconstant irls vce(robust) offset(cll_pred)      
+}
+
 
 ************************************************
 ** IECV predictions and performance estimates **
@@ -159,14 +192,14 @@ postfile `C_EP3regionnnet' beta st_err val_size using C_EP3regionnnet.dta , repl
   postclose `C_EP3regionnnet' 
   
 *********************************
-* GT IECV for calibration slope *                                   // Similar as regression modelling - slope is gradient term from generalised linear model 
+* GT IECV for calibration slope *                                   
 
 capture postutil clear   
 tempname slope_EP3regionnnet
 postfile `slope_EP3regionnnet' slope slope_se val_size using slope_EP3regionnnet.dta , replace 
   
   forval x = 1(1)10 {
-  mi estimate, dots: glm period2_pseudo prediction if sha1==`x', irls vce(robust) 
+  mi estimate, dots: glm period2_pseudo cll_pred if sha1==`x', link(cloglog) noconstant irls vce(robust) 
   local slope = r(table)[1,1]
   local slope_se = r(table)[2,1]
   local val_size = e(N)
@@ -176,28 +209,21 @@ postfile `slope_EP3regionnnet' slope slope_se val_size using slope_EP3regionnnet
   postclose `slope_EP3regionnnet'  
   
 ****************************************
-* GT IECV for calibration-in-the-large *                           // CITL is the intercept term when constrainnig slope to 1 
+* GT IECV for calibration-in-the-large *                           // CITL is the intercept term when constraining slope to 1 
 
 capture postutil clear   
 tempname citl_EP3regionnnet
 postfile `citl_EP3regionnnet' citl citl_se val_size using citl_EP3regionnnet.dta , replace 
   
   forval x = 1(1)10 { 
-  mi estimate, dots: glm period2_pseudo prediction if sha1==`x', offset(prediction) irls vce(robust)  
-  local citl = r(table)[1,2]
-  local citl_se = r(table)[2,2]
+  mi estimate, dots: glm period2_pseudo cll_pred if sha1==`x', link(cloglog) noconstant irls vce(robust) offset(cll_pred)    
+  local citl = r(table)[1,1]
+  local citl_se = r(table)[2,1]
   local val_size = e(N)
   post `citl_EP3regionnnet' (`citl') (`citl_se') (`val_size')
   }
   
   postclose `citl_EP3regionnnet'
- 
- ** Decision curve analysis for neural network model ** 
-summ mean_prediction, det  
-
-cd "\\qrvfile1\OX129\ado\plus\"
-stdca mean_prediction, prob(yes) smooth timepoint(10) title("Decision curve analysis - neural network", size(small))
-graph save "Graph" "\graphs\EP3_DCA_neuralnetwork.gph", replace 
  
 * Event/denominator counts for meta-analysis plots below * 
 tab sha1 _d if period==2                                        // Number of events in each region during Period 2, and total in each region 
@@ -222,7 +248,7 @@ input str50 region
 "West Midlands (1,032/8,678)"
 "Yorkshire & Humber (484/3,946)"
 end
-meta set beta st_err, studylab(region)
+meta set beta st_err, studylab(region) eslabel("Harrell's C") 
 meta summarize, random(sjonkman) se(khartung) predinterval(95)
 meta forestplot, random(sjonkman) se(khartung) predinterval(95) 
 graph save "Graph" "\graphs\EP3_harrellsC_nnet.gph", replace 
@@ -241,9 +267,9 @@ input str50 region
 "West Midlands (1,032/8,678)"
 "Yorkshire & Humber (484/3,946)"
 end
-meta set slope slope_se, studylab(region)
+meta set slope slope_se, studylab(region) eslabel("Calibration slope") 
 meta summarize, random(sjonkman) se(khartung) predinterval(95)
-meta forestplot, random(sjonkman) se(khartung) predinterval(95) 
+meta forestplot, random(sjonkman) se(khartung) predinterval(95) xline(1) 
 graph save "Graph" "\graphs\EP3_slope_nnet.gph", replace 
 clear
 
@@ -260,9 +286,9 @@ input str50 region
 "West Midlands (1,032/8,678)"
 "Yorkshire & Humber (484/3,946)"
 end
-meta set citl citl_se, studylab(region)
+meta set citl citl_se, studylab(region) eslabel("Calibration-in-the-large") 
 meta summarize, random(sjonkman) se(khartung) predinterval(95)
-meta forestplot, random(sjonkman) se(khartung) predinterval(95) 
+meta forestplot, random(sjonkman) se(khartung) predinterval(95) xline(0)
 graph save "Graph" "\graphs\EP3_citl_nnet.gph", replace 
 clear
 
@@ -298,9 +324,8 @@ bys patid: gen m = _n
 * Clip the predictions to be between 0 and 1 - they are probabilities * 
 count if predictions<0
 count if predictions>1
-replace predictions = 0 if predictions<0 
-replace predictions = 1 if predictions>1 
-summ predictions, det 
+replace predictions = 0.0000001 if predictions<0      ## Miniscule risk rather than zero, will use cloglog transform later!
+replace predictions = 0.9999999 if predictions>1  
 
 * Save this as interim dataset * 
 save "\estimates\ML_IECV_predictions\endpoint3_xgboost_iecv_predictions_formatted.dta", replace
@@ -361,11 +386,15 @@ mi merge 1:1 patid using "\estimates\ML_IECV_predictions\endpoint3_xgboost_iecv_
 running period2_pseudo mean_prediction if _mi_m==1, ci leg(off) nopts xscale(range(0 1)) yscale(range(0 1)) aspect(1) //
 title("Smoothed calibration plot - XGBoost", size(small)) xtitle("Predicted event probability", size(small)) // 
 ytitle("Observed event probability", size(small)) addplot(function y=x) graphregion(color(white)) ylabel(0(.2)1) xlabel(0(.2)1)
+
 graph save "\graphs\ep3_competing\calibration_xgboost_iecv.gph", replace
 
+* Calculate the cloglog transforms * 
+mi passive: gen cll_pred = log(-log(-prediction)) 
+
 * Calibration of neural network - pooled predictions * 
-mi estimate, dots: glm period2_pseudo prediction, link(id) vce(robust) irls
-mi estimate, dots: glm period2_pseudo prediction, offset(prediction) link(id) vce(robust) irls
+mi estimate, dots: glm period2_pseudo cll_pred, link(cloglog) vce(robust) noconstant irls
+mi estimate, dots: glm period2_pseudo cll_pred, link(cloglog) vce(robust) noconstant irls offset(cll_pred) 
  
 * Discrimination - pooled predictions * 
 mi register regular ipcw 
@@ -387,12 +416,41 @@ forval x = 1(1)9 {
 
 * Calibration slope and calibration-in-the-large * 
 forval x = 1(1)9 { 
-	mi estimate, dots esampvaryok: glm period2_pseudo prediction if ethriskid==`x', irls vce(robust) 
+	mi estimate, dots esampvaryok: glm period2_pseudo cll_pred if ethriskid==`x', link(cloglog) vce(robust) noconstant irls  
 }
 
 forval x = 1(1)9 { 
-	mi estimate, dots esampvaryok: glm period2_pseudo prediction if ethriskid==`x', offset(prediction) irls vce(robust) 
+	mi estimate, dots esampvaryok: glm period2_pseudo cll_pred if ethriskid==`x', link(cloglog) vce(robust) noconstant irls offset(cll_pred)  
 }
+
+
+**************
+* Age groups *
+**************
+gen agegroup = 1 
+replace agegroup = 2 if age_at_diagnosis>=30 
+replace agegroup = 3 if age_at_diagnosis>=40 
+replace agegroup = 4 if age_at_diagnosis>=50 
+replace agegroup = 5 if age_at_diagnosis>=60 
+replace agegroup = 6 if age_at_diagnosis>=70 
+replace agegroup = 7 if age_at_diagnosis>=80 
+tab agegroup 
+
+* Discrimination and calibration in different age bands * 
+forval x = 1(1)7 {
+	mi estimate, dots: somersd _t invhr if (_st==1 & agegroup==`x') [iweight=ipcw], cenind(censind) tdist transf(c)    
+  } 
+
+* Calibration slope * 
+forval x = 1(1)7 {
+	mi estimate, dots: glm period2_pseudo cll_pred if agegroup==`x', link(cloglog) noconstant irls vce(robust)     
+}
+
+* Calibration in the large * 
+forval x = 1(1)7 {
+	mi estimate, dots: glm period2_pseudo cll_pred if agegroup==`x', link(cloglog) noconstant irls vce(robust) offset(cll_pred)      
+}
+
 
 ************************************************
 ** IECV predictions and performance estimates **
@@ -431,7 +489,7 @@ tempname slope_EP3regionxgboost
 postfile `slope_EP3regionxgboost' slope slope_se val_size using slope_EP3regionxgboost.dta , replace 
   
   forval x = 1(1)10 {
-  mi estimate, dots: glm period2_pseudo prediction if sha1==`x', irls vce(robust) 
+  mi estimate, dots: glm period2_pseudo cll_pred if sha1==`x', link(cloglog) vce(robust) irls noconstant 
   local slope = r(table)[1,1]
   local slope_se = r(table)[2,1]
   local val_size = e(N)
@@ -448,9 +506,9 @@ tempname citl_EP3regionxgboost
 postfile `citl_EP3regionxgboost' citl citl_se val_size using citl_EP3regionxgboost.dta , replace 
   
   forval x = 1(1)10 { 
-  mi estimate, dots: glm period2_pseudo prediction if sha1==`x', offset(prediction) irls vce(robust)  
-  local citl = r(table)[1,2]
-  local citl_se = r(table)[2,2]
+  mi estimate, dots: glm period2_pseudo cll_pred if sha1==`x', link(cloglog) vce(robust) irls noconstant offset(cll_pred) 
+  local citl = r(table)[1,1]
+  local citl_se = r(table)[2,1]
   local val_size = e(N)
   post `citl_EP3regionxgboost' (`citl') (`citl_se') (`val_size')
   }
@@ -458,13 +516,6 @@ postfile `citl_EP3regionxgboost' citl citl_se val_size using citl_EP3regionxgboo
   postclose `citl_EP3regionxgboost'
  
 
-** Decision curve analysis for XGBoost ** 
-summ mean_prediction, det  
-
-cd "\ado\plus\"
-stdca mean_prediction, prob(yes) smooth timepoint(10) title("Decision curve analysis - XGBoost", size(small))
-graph save "Graph" "\graphs\EP3_DCA_XGBoost.gph", replace 
- 
 clear 
 
 *****************
@@ -506,7 +557,7 @@ input str50 region
 end
 meta set slope slope_se, studylab(region) eslabel("Calibration slope")
 meta summarize, random(sjonkman) se(khartung) predinterval(95)
-meta forestplot, random(sjonkman) se(khartung) predinterval(95) 
+meta forestplot, random(sjonkman) se(khartung) predinterval(95) xline(1) 
 graph save "Graph" "\graphs\EP3_slope_xgboost.gph", replace 
 clear
 
@@ -525,7 +576,7 @@ input str50 Region
 end
 meta set citl citl_se, studylabel("Region") eslabel("Calibration-in-the-large") 
 meta summarize, random(sjonkman) se(khartung) predinterval(95)
-meta forestplot, random(sjonkman) se(khartung) predinterval(95)
+meta forestplot, random(sjonkman) se(khartung) predinterval(95) xline(0)
 graph save "Graph" "\\graphs\EP3_citl_xgboost.gph", replace 
 clear
 

@@ -66,17 +66,13 @@ mi stset time, failure(d_breastca==1) exit(time 10)
 ** Fit full model, including interactions **
 ******************************************** 
 * Form global for covariates, then use this in the model * 
-global covariates = "age_fp* bmi_fp* town_int i.ethriskid i.alcohol_cat i.smoke_cat //
-ib6.cancer_route ib2.pr_status ib2.HER2 ib2.er_status i.fh_breastca i.radio i.chemo i.mastect//
-i.other_surg i.cancer_stage i.cancer_grade i.ckd i.cirrhosis i.htn i.ihd i.type1dm //
-i.type2dm i.vasculitis i.lupus i.thiazide i.betablocker i.acei i.raa i.tca i.ssri //
-i.maoi i.otherantidepress i.ocp i.hrt i.anti_psycho c.Iage___1##i.chemo c.Iage___2##i.chemo //
-c.Iage___1##i.mastec c.Iage___2##i.mastec c.Iage___1##i.other_surg c.Iage___2##i.other_surg //
-c.Iage___1##i.fh_breastca c.Iage___2##i.fh_breastca c.Iage___1##i.ethriskid c.Iage___2##i.ethriskid //
-i.mastectomy##i.ethriskid i.other_surg##i.ethriskid"
-
-* Fit the model, and save 'full model' coefficients for later use if needed) 
-cd "\models\Endpoint_3\"
+global covariates = "age_fp* bmi_fp* townsend i.ethriskid i.alcohol_cat i.smoke_cat // 
+ib6.cancer_route ib2.pr_status, ib2.her2_status, i.fh_breastca i.radio i.chemo i.mastectomy //
+i.other_surg i.cancer_stage i.cancer_grade i.ckd i.cirrhosis i.htn i.ihd i.t1dm i.t2dm i.vasculitis //
+i.lupus i.thiazide i.betablocker i.acei i.raa i.tca i.ssri i.maoi i.otherantidepress i.ocp i.hrt // 
+i.anti_psycho c.age_fp1##i.chemo c.age_fp2##i.chemo c.age_fp1##i.mastec c.age_fp2##i.mastec  // 
+c.age_fp1##i.other_surg c.age_fp2##i.other_surg c.age_fp1##i.fh_breastca c.age_fp2##i.fh_breastca i.ethriskid##c.age_fp1 //
+i.ethriskid##c.age_fp2 i.ethriskid##i.other_surg i.ethriskid##i.mastectomy i.ethriskid##i.chemotherapy i.ethriskid##i.radiotherapy"
 
 mi estimate, dots eform errorok: stcox $covariates, vce(cluster study_practice) 
 parmest, list(,) saving(cox_endpoint3_parmest_fullmodel_preselection.dta, replace) label eform for(estimate min95 max95) 

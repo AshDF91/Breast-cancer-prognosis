@@ -1,20 +1,52 @@
 ## Cox proportional hazards model ##
 
 
-## Fractional polynomial selection, and multiple imputation already performed 
-## outcomedate6 = date of breast cancer diagnosis (start of follow-up) 
-## d_breastcancer = binary variable denoting breast cancer death (=1) or not (=0)
-## exit3date = date left cohort (died, or censored) 
-## exit3status = categorical (0=censored, 1 = died) 
-## Period = binary denoting decade of cohort entry (1=entered pre-2010, 2 = entered 2010 onwards) 
+## Multiple imputation already performed  ##
 
+****************************************************************************
+*              1) FRACTIONAL POLYNOMIAL TERM SELECTION                     *
+****************************************************************************
+use "\final_datasets\OX129_endpoint3.dta"              // complete case data 
+
+summ age, det 
+summ diagnosis_bmi, det 
+summ town_int, det 
+
+* outcomedate6 = date of breast cancer diagnosis (start of follow-up) 
+* d_breastcancer = binary variable denoting breast cancer death (=1) or not (=0)
+* exit3date = date left cohort (died, or censored) 
+* exit3status = categorical (0=censored, 1 = died) 
+* outcomedate6 = date of breast cancer diagnosis 
+
+stset exit3date, origin(outcomedate6) fail(d_breastca==1) scale(365.25) exit(time outcomedate6 + 3652.5)
+
+* Run mfp package to find FP terms * 
+mfp stcox age diagnosis_bmi town_int, all 
+
+* Age = 0.5, 2 
+* BMI = 2, 2 
+* Townsend score = 1 (keep linear) 
+clear 
+********************************************************************************
 
 ********************************************************************************
-*          1) FIT FULL MODEL, PERFORM PREDICTOR VARIABLE SELECTION             *
+*          2) FIT FULL MODEL, PERFORM PREDICTOR VARIABLE SELECTION             *
 ********************************************************************************
-# Complete file paths not displayed #
 
-use "\final_datasets\OX129_endpoint3_imputed.dta"
+use "\final_datasets\OX129_endpoint3_imputed.dta"     // imputed data, ready for modelling 
+
+** Generate FP terms - this was generated in a previous step above ** 
+mi passive: gen double bmi_x = bmi/10
+mi passive: gen bmi_fp1 = (bmi_x^-2) - 0.1353749689
+mi passive: gen bmi_fp2 = (bmi_x^-2)*ln(bmi_x) - 0.1353551232
+
+fp gen double ge_at_diagnosis^(.5 2), scale(0 10) center(63.1168366)
+rename age_at_diagnosis1 age_fp1 
+rename age_at_diagnosis age_fp2 
+
+* register as imputed variables to Stata knows how to handle them across mi commands * 
+mi register imputed bmi_fp1 bmi_fp2     // imputed variables from passive 
+mi register regular age_fp1 age_fp2     // age was complete for all, so just declare as regular 
 
 * Tabulate events - d_breastcancer = breast cancer death (of interest), 
 * exit3status = contains all cause death (use to define competing event)
@@ -29,23 +61,19 @@ replace time = time/365.25
 ************************************************************************ 
 mi stset time, failure(d_breastca==1) exit(time 10)
 
-************************************************************************
-* Rescale Townsend variable - Itown was made by mfp command, power = 1 *
-************************************************************************ 
-* the 0.57 is to undo the centering performed by mfp * 
-mi passive: gen townsend = Itown__1-0.5719195882
 
 ********************************************
 ** Fit full model, including interactions **
 ******************************************** 
 * Form global for covariates, then use this in the model * 
-global covariates = "Iage* Idiag* townsend i.ethriskid i.alcohol_cat i.smoke_cat //
-ib6.cancer_route ib2.progesterone ib2.HER2 i.fh_breastca i.radio i.chemo i.mastect//
+global covariates = "age_fp* bmi_fp* town_int i.ethriskid i.alcohol_cat i.smoke_cat //
+ib6.cancer_route ib2.pr_status ib2.HER2 ib2.er_status i.fh_breastca i.radio i.chemo i.mastect//
 i.other_surg i.cancer_stage i.cancer_grade i.ckd i.cirrhosis i.htn i.ihd i.type1dm //
 i.type2dm i.vasculitis i.lupus i.thiazide i.betablocker i.acei i.raa i.tca i.ssri //
 i.maoi i.otherantidepress i.ocp i.hrt i.anti_psycho c.Iage___1##i.chemo c.Iage___2##i.chemo //
 c.Iage___1##i.mastec c.Iage___2##i.mastec c.Iage___1##i.other_surg c.Iage___2##i.other_surg //
-c.Iage___1##i.fh_breastca c.Iage___2##i.fh_breastca c.Iage___1##i.ethriskid c.Iage___2##i.ethriskid i.mastectomy##i.ethriskid i.other_surg##i.ethriskid"
+c.Iage___1##i.fh_breastca c.Iage___2##i.fh_breastca c.Iage___1##i.ethriskid c.Iage___2##i.ethriskid //
+i.mastectomy##i.ethriskid i.other_surg##i.ethriskid"
 
 * Fit the model, and save 'full model' coefficients for later use if needed) 
 cd "\models\Endpoint_3\"
@@ -57,19 +85,19 @@ parmest, list(,) saving(cox_endpoint3_parmest_fullmodel_preselection.dta, replac
 
 
 ********************************************************************************
-*                             2) FIT FINAL MODEL                               *
+*                             3) FIT FINAL MODEL                               *
 ********************************************************************************
 
 ************************************************************
 ** Refit model, with variables meeting inclusion criteria **
 ************************************************************
-* Keep if HR<0.9 or HR>1.1 and p<0.05 * 
-* Keep if interaction significant at p<0.05 * 
+* Keep if HR<0.9 or HR>1.1 and p<0.01 * 
+* Keep if interaction significant at p<0.01 * 
 
-global selected_covariates = "Iage* Idiag* i.smoke_cat ib6.cancer_route ib2.progesterone //
-ib2.HER2 i.fh_breastca i.radio i.mastect i.other_surg i.cancer_stage i.cancer_grade i.ckd //
-i.cirrhosis i.tca i.ssri i.otherantidepress i.hrt i.anti_psycho c.Iage___1##i.mastec c.Iage___2##i.mastec //
-c.Iage___1##i.other_surg c.Iage___2##i.other_surg i.ethriskid##i.mastectomy" 
+global selected_covariates = "age_fp* bmi_fp* i.smoke_cat ib6.cancer_route ib2.pr_status ib2.er_status //
+ib2.her2_status i.fh_breastca i.radio i.chemo i.mastect i.other_surg i.cancer_stage i.cancer_grade i.ckd //
+i.cirrhosis i.acei i.tca i.ssri i.otherantidepress i.hrt i.anti_psycho c.age_fp1##i.mastec c.age_fp2##i.mastec //
+c.age_fp1##i.other_surg c.age_fp2##i.other_surg"
 
 ************************
 * Save final Cox model *
@@ -93,7 +121,7 @@ summ baseline_surv_cox
 
 
 ********************************************************************************
-*                 	3) INTERNAL-EXTERNAL CROSS-VALIDATION RUN                  *
+*                 	4) INTERNAL-EXTERNAL CROSS-VALIDATION RUN                  *
 ********************************************************************************
 
 **********************
@@ -195,7 +223,7 @@ clear
 
 
 ********************************************************************************
-*	          4) PERFORMANCE ASSESSMENT, INC. HETEROGENEITY                    *
+*	          5) PERFORMANCE ASSESSMENT, INC. HETEROGENEITY                    *
 ********************************************************************************
 
 use "\final_datasets\OX129_endpoint3_imputed_IECV.dta", clear 

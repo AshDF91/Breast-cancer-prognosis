@@ -1,0 +1,142 @@
+
+******************************************************************************** 
+*                           1) Variable descriptions                           *
+*                          2) Multiple imputation run                          *
+********************************************************************************
+
+********************************************************************************
+*                           1) Variable descriptions                           *
+********************************************************************************
+
+* All variables are latest recorded prior to/at date of diagnosis, unless specified* 
+
+* age = continuous
+* diagnosis_bmi = body mass index, continuous 
+* town_int = Townsend deprivation score, continuous 
+* alcohol_cat = alcohol intake group, based on units/day coding in EMIS, ordinal 
+* smoke_cat = smoking status, as per EMIS coding (non-smoker, ex-smoker, etc.) ordinal  
+* cancer_stage = stage at diagnosis, stge I, II, III, IV, ordinal 
+* cancer_grade = differentiation/grade of tumour, ordinal  
+* er_status = Oestrogen receptor status, binary (+ve, -ve)
+* pr_status = progesterone receptor status, binary (+ve, -ve) 
+* her2_status = HER2 receptor status, binary (+ve, -ve) 
+* cancer_route = route to cancer diagnosis, from PHE. E.g. screen-detected, emergency admission, categorical 
+* ethriskid = self-reported ethnicity, informed by ONS classes, categorical 
+* fh_breastca = recorded family history of breast cancer, binary 
+* radio = radiotherapy within 1 year of breast cancer diagnosis, binary 
+* chemo = chemotherapy within 1 year of breast cancer diagnosis, binary 
+* mastectomy = mastectomy within 1 year of breast cancer diagnosis, binary 
+* other_surg = other surgery (e.g. wide local excision) within 1 year of breast cancer diagnosis, binary 
+* ckd = chronic kidney disease, ordinal 
+* cirrhosis = chronic liver disease or cirrhosis, binary 
+* htn = hypertension, binary 
+* ihd = history of ischaemic heart disease, binary 
+* t1dm = type 1 diabetes mellitus, binary 
+* t2dm = type 2 diabetes mellitus, binary 
+* vasculitis = vasculitis, binary 
+* lupus = systemic lupus erythematosus, binary 
+* thiazide = use of thiazide within 6months pre-diagnosis, binary 
+* betablocker = use of beta-blocker med within 6mo pre-diagnosis, binary 
+* acei = use of ACE inhibitor med within 6mo pre-diagnosis, binary 
+* tca = use of tricyclic antidepressant within 6mo pre-diagnosis, binary 
+* ssri = use of selective serotonion reuptake inhibitor within 6mo pre-diagnosis, binary 
+* maoi = use of monoamine oxidase inhibitor within 6mo pre-diagnosis 
+* otherantidepress = use of other (not above) antidepressant within 6mo pre-diagnosis 
+* ocp = use of oral contraceptive pill within 6mo pre-diagnosis 
+* hrt = use of hormone replacement therapy within 6mo pre-diagnosis 
+* anti_psycho = use of anti-psychotic medication within 6mo pre-diagnosis 
+* d_breastca = death with breast cancer on death certificate during follow-up
+* outcomedate6 = date of breast cancer diagnosis (earliest of GP/HES/CancerRegistry)  
+* exit3date = date of death, date of censoring (right censor date) 
+
+
+******************************************************************************** 
+*                1) MULTIPLE IMPUTATION PREPARATION AND RUN                    *  
+******************************************************************************** 
+
+use "\data\final_datasets\Endpoint_3\OX129_endpoint3.dta" 
+
+* Visualise distributions of continuous variables *  
+
+histogram age, percent normal  
+histogram diagnosis_bmi, percent normal  
+
+* Assess natural log transform - ? better normality of distribution for multiple imputation?*  
+gen ln_bmi = log(diagnosis_bmi) 
+histogram ln_bmi, percent normal 
+* Chekc for Townsend score *
+histogram town_int, percent normal    // looks fine 
+
+ 
+* Stset the data so that we can identify optimal FP terms in turn for the aformentioned continuous variables *  
+* Tabulate the breast cancer death variable * 
+tab d_breastcancer 
+
+* Stset the data, restrict to 10 years follow-up (prediction horizon) *  
+stset exit3date, origin(outcomedate6) fail(d_breastca==1) scale(365.25) exit(time outcomedate6 + 3652.5) 
+
+* Estimate Nelson-Aalen cumulative failure function for inclusion in imputation model *  
+sts gen nelson_aalen = na 
+summ nelson_aalen, det  
+
+* Quantify degree of missingness for key variables to be considered *  
+tab ethriskid, m  
+tab smoke_cat, m  
+tab alcohol_cat, m  
+tab er_status, m  
+tab her2_status, m  
+tab pr_status, m  
+tab cancer_grade, m  
+tab cancer_route, m  
+tab cancer_stage, m  
+
+count if ln_bmi==.  
+count if town_int==.  
+
+* Assess ranges for continuous variables, so that we can perform truncated regression in multiple imputation *  
+summ ln_bmi, det  
+summ town_int, det  
+
+* Use period (decade) of cohort entry as an auxiliary variable *  
+gen timesplit = td(31Dec2009)
+format timesplit %td  
+gen period = 1  
+replace period = 2 if outcomedate6>timesplit  
+tab period  
+ 
+** Set up the data for multiple imputation, register variables to be imputed, and run it **  
+mi set wide  
+
+mi register imputed ln_bmi town_int smoke_cat alcohol_cat cancer_grade cancer_stage // 
+cancer_route er_status pr_status her2_status ethriskid  
+
+timer on 1  
+
+* nelson-aalen cumulative hazard estimate, period of cohort entry as auxiliary variables * 
+* Include the endpoint * 
+
+mi impute chained (truncreg, ll(2.70805) ul(3.850157)) ln_bmi (truncreg, ll(-7) ul(10))           // 
+town_int (ologit, ascontinuous) alcohol_cat smoke_cat cancer_stage cancer_grade                   // 
+(mlogit, ascontinuous) er_status pr_status her2_status cancer_route ethriskid = age i.fh_breastca //
+i.radio i.chemo i.ckd i.cirrhosis i.htn i.ihd i.t1dm i.t2dm i.vasculitis i.lupus i.thiazide i.betablocker  //
+i.acei i.raa i.tca i.ssri i.maoi i.otherantidepress i.ocp i.hrt i.anti_psycho i.mastect i.other_surg //
+i._d nelson_aalen i.period, add(50) augment chaindots rseed(1066)  
+
+timer off 1  
+timer list  
+timer clear  
+ 
+* Convert ln(BMI) back to original scale for later use in FPs and models *  
+mi passive: gen bmi = exp(ln_bmi) 
+summ _1_bmi, det  
+summ _50_bmi, det  
+
+* Save imputed datasats for use next - FP selection, model fitting, evaluation *  
+save "\data\final_datasets\Endpoint_3\OX129_endpoint3_imputed.dta", replace  
+
+clear  
+log close  
+******************************************************************************** 
+******************************************************************************** 
+
+ 

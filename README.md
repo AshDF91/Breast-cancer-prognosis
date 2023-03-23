@@ -1,3 +1,4 @@
+- Please take note of the file Licence.txt
 - 👋 Hi, I’m Ash Darnell-Fish @AshDF91
 - 👀 Clinical Research Fellow (DPhil) at Uni of Oxford
 - 🌱 Interested in clinical prediction modelling using statistical learning and machine learning

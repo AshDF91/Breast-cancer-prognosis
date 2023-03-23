@@ -1,4 +1,4 @@
-**  Please review the file 'Licence.txt' regardng the academic use license ** 
+**  Please review the file 'Licence.txt' regarding the academic use license ** 
 
 - 👋 Hi, I’m Ash Darnell-Fish @AshDF91
 - 👀 Clinical Research Fellow (DPhil) at Uni of Oxford
